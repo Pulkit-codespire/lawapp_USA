@@ -21,6 +21,12 @@ const sequelize = new Sequelize(databaseUrl, {
     idle: 10000,
     acquire: 30000,
   },
+  dialectOptions: nodeEnv === 'production' ? {
+    ssl: {
+      require: true,
+      rejectUnauthorized: false,
+    },
+  } : {},
 });
 
 /* Register pgvector custom type with Sequelize */
