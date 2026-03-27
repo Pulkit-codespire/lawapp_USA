@@ -1,0 +1,78 @@
+# =============================================================
+# LawApp — Render Deployment Configuration (Backend Only)
+# =============================================================
+
+services:
+  - type: web
+    name: lawapp-server
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: PORT
+        value: 8000
+
+      - key: HOST
+        value: 0.0.0.0
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lawapp-db
+          property: connectionString
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: SIMILARITY_THRESHOLD
+        value: "0.01"
+
+      - key: TOP_K_RESULTS
+        value: "10"
+
+      - key: RERANK_TOP_K
+        value: "5"
+
+      - key: CHUNK_SIZE
+        value: "800"
+
+      - key: CHUNK_OVERLAP
+        value: "150"
+
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+
+      - key: EMBEDDING_DIMENSIONS
+        value: "1536"
+
+      - key: EMBEDDING_BATCH_SIZE
+        value: "100"
+
+      - key: CHAT_MODEL
+        value: gpt-4o
+
+      - key: CHAT_MAX_TOKENS
+        value: "2000"
+
+      - key: CHAT_TEMPERATURE
+        value: "0.1"
+
+      - key: UPLOAD_DIR
+        value: /tmp/lawapp-uploads
+
+      - key: CASE_FILES_ROOT
+        value: /tmp/lawapp-cases
+
+databases:
+  - name: lawapp-db
+    databaseName: lawapp
+    user: lawapp_user
+    region: oregon
+    plan: free
