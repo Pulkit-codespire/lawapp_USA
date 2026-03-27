@@ -1,0 +1,25 @@
+{
+  "env": {
+    "node": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "module"
+  },
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-console": "warn",
+    "consistent-return": "error",
+    "camelcase": ["error", { "properties": "never" }],
+    "prefer-const": "error",
+    "no-var": "error",
+    "eqeqeq": "error",
+    "no-throw-literal": "error",
+    "require-await": "warn",
+    "no-return-await": "warn",
+    "max-lines": ["warn", { "max": 350, "skipBlankLines": true, "skipComments": true }],
+    "max-lines-per-function": ["warn", { "max": 50, "skipBlankLines": true, "skipComments": true }]
+  }
+}

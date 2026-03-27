@@ -1,0 +1,59 @@
+2026-03-27 11:20:58 [ERROR] Failed to start server: extension "vector" is not available
+2026-03-27 11:42:23 [ERROR] Unhandled error: column Chunk.embedding does not exist
+Error
+    at Query.run (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\dialects\postgres\query.js:50:25)
+    at C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\sequelize.js:315:28
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async PostgresQueryInterface.select (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\dialects\abstract\query-interface.js:407:12)
+    at async Chunk.findAll (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\model.js:1140:21)
+    at async keywordSearch (C:\Projects\lawApp_USA\server\services\rag\retriever.js:137:18)
+    at async Object.search (C:\Projects\lawApp_USA\server\services\rag\retriever.js:78:19)
+    at async postChat (C:\Projects\lawApp_USA\server\controllers\chatController.js:29:18)
+2026-03-27 12:09:53 [ERROR] Unhandled error: column Chunk.embedding does not exist
+Error
+    at Query.run (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\dialects\postgres\query.js:50:25)
+    at C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\sequelize.js:315:28
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async PostgresQueryInterface.select (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\dialects\abstract\query-interface.js:407:12)
+    at async Chunk.findAll (C:\Projects\lawApp_USA\server\node_modules\sequelize\lib\model.js:1140:21)
+    at async keywordSearch (C:\Projects\lawApp_USA\server\services\rag\retriever.js:137:18)
+    at async Promise.all (index 1)
+    at async Object.search (C:\Projects\lawApp_USA\server\services\rag\retriever.js:67:45)
+    at async postChat (C:\Projects\lawApp_USA\server\controllers\chatController.js:29:18)
+2026-03-27 12:53:15 [ERROR] Ingestion failed for Email from Dr Alistar Baker 1st August 2023.docx: Unsupported file type: unknown
+2026-03-27 12:53:15 [ERROR] Ingestion failed for Email from Dr Alistar Baker 1st August 2023[40].docx: Unsupported file type: unknown
+2026-03-27 13:18:01 [ERROR] Uncaught exception: Error: Error attempting to read image.
+Error: Error: Error attempting to read image.
+    at Worker.<anonymous> (C:\Projects\lawApp_USA\server\node_modules\tesseract.js\src\createWorker.js:247:15)
+    at Worker.emit (node:events:508:28)
+    at MessagePort.<anonymous> (node:internal/worker:332:53)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:845:20)
+    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)
+2026-03-27 13:18:35 [ERROR] Uncaught exception: Error: Error attempting to read image.
+Error: Error: Error attempting to read image.
+    at Worker.<anonymous> (C:\Projects\lawApp_USA\server\node_modules\tesseract.js\src\createWorker.js:247:15)
+    at Worker.emit (node:events:508:28)
+    at MessagePort.<anonymous> (node:internal/worker:332:53)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:845:20)
+    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)
+2026-03-27 13:19:38 [ERROR] Uncaught exception: Error: Error attempting to read image.
+Error: Error: Error attempting to read image.
+    at Worker.<anonymous> (C:\Projects\lawApp_USA\server\node_modules\tesseract.js\src\createWorker.js:247:15)
+    at Worker.emit (node:events:508:28)
+    at MessagePort.<anonymous> (node:internal/worker:332:53)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:845:20)
+    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)
+2026-03-27 13:20:14 [ERROR] Extraction failed for 1774597814932-218368647.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 13:20:14 [ERROR] Ingestion failed for 1678259HMCoronerforInnerSouthDistrictGreaterLondonInquestBalramPatel230625doc-V1.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 13:51:52 [ERROR] Extraction failed for 1774599711689-591120737.pdf: OCR failed for scanned PDF: convert is not a function
+2026-03-27 13:51:52 [ERROR] Ingestion failed for Discharge letter_240401_110232.pdf: OCR failed for scanned PDF: convert is not a function
+2026-03-27 15:05:54 [ERROR] Extraction failed for 1774604154390-523950241.pdf: OCR failed for scanned PDF: convert is not a function
+2026-03-27 15:05:54 [ERROR] Ingestion failed for Discharge letter_240401_110232.pdf: OCR failed for scanned PDF: convert is not a function
+2026-03-27 15:07:45 [ERROR] Extraction failed for 1774604265100-968057.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:07:45 [ERROR] Ingestion failed for Coroner for Inner South District Greater London Inquest Balram Patel 2nd June 2025.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:07:49 [ERROR] Extraction failed for 1774604269286-508687939.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:07:49 [ERROR] Ingestion failed for Coroner for Inner South District Greater London Inquest Balram Patel 23rd June 2025.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:07:52 [ERROR] Extraction failed for 1774604272596-751334110.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:07:52 [ERROR] Ingestion failed for Coroner for Inner South District Greater London Inquest Balram Patel.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:10:26 [ERROR] Extraction failed for 1774604426211-866035228.doc: Could not find the body element: are you sure this is a docx file?
+2026-03-27 15:10:26 [ERROR] Ingestion failed for 1678259HMCoronerforInnerSouthDistrictGreaterLondonInquestBalramPatel230625doc-V1.doc: Could not find the body element: are you sure this is a docx file?
