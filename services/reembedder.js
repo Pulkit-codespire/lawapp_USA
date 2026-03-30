@@ -261,4 +261,33 @@ async function _reembedInBatches(model, totalChunks) {
   }
 }
 
-module.exports = { reembedAll, getStatus, getDimensions, detectDimensions, MODEL_DIMENSIONS };
+/**
+ * Ensure the DB vector column matches the given dimensions.
+ * If mismatched, alters the column (WARNING: existing embeddings are lost).
+ * @param {number} requiredDims - Required vector dimensions
+ * @returns {Promise<boolean>} true if column was altered, false if already correct
+ */
+async function ensureColumnDimensions(requiredDims) {
+  try {
+    const [result] = await sequelize.query(
+      `SELECT atttypmod FROM pg_attribute
+       WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'`
+    );
+
+    if (result.length > 0 && result[0].atttypmod > 0) {
+      const currentDims = result[0].atttypmod;
+      if (currentDims === requiredDims) {
+        return false;
+      }
+      logger.warn(`Vector column dimension mismatch: DB has ${currentDims}, need ${requiredDims}. Altering column...`);
+    }
+
+    await _alterVectorColumn(requiredDims);
+    return true;
+  } catch (err) {
+    logger.error(`Failed to ensure column dimensions: ${err.message}`);
+    throw err;
+  }
+}
+
+module.exports = { reembedAll, getStatus, getDimensions, detectDimensions, ensureColumnDimensions, MODEL_DIMENSIONS };

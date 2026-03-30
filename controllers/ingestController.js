@@ -12,6 +12,7 @@ const chunker = require('../services/ingestion/chunker');
 const metadataExtractor = require('../services/ingestion/metadataExtractor');
 const fileDetector = require('../services/ingestion/fileDetector');
 const embedder = require('../services/embedder');
+const reembedder = require('../services/reembedder');
 const logger = require('../config/logger');
 const { HTTP_STATUS } = require('../utils/constants');
 const { ExtractionError } = require('../utils/errors');
@@ -149,6 +150,11 @@ async function _processSingleFile(filePath, caseName, originalName) {
     /* Generate embeddings */
     const texts = chunks.map((c) => c.text);
     const embeddings = await embedder.embedBatch(texts, true);
+
+    /* Ensure DB vector column matches embedding dimensions */
+    if (embeddings.length > 0 && embeddings[0].length > 0) {
+      await reembedder.ensureColumnDimensions(embeddings[0].length);
+    }
 
     /* Save document */
     const document = await Document.create({
