@@ -123,40 +123,46 @@ async function getStatus(req, res) {
  * @private
  */
 async function _processSingleFile(filePath, caseName, originalName) {
+  /*
+   * IMPORTANT: The slow steps (extract, chunk, embed) run OUTSIDE a transaction
+   * to avoid holding a DB connection open for minutes — Render/free-tier DBs
+   * drop idle connections after ~30s. Only the fast DB writes use a transaction.
+   */
+
+  /* Step 1: Extract text (slow — especially OCR) */
+  const extraction = await textExtractor.extract(filePath);
+  if (!extraction.success) {
+    throw new ExtractionError(extraction.error || 'Text extraction failed');
+  }
+
+  /* Step 2: Clean text */
+  const cleanedText = textCleaner.clean(extraction.text);
+  if (cleanedText.length === 0) {
+    throw new ExtractionError('No text content after cleaning');
+  }
+
+  /* Step 3: Extract metadata */
+  let metadata = metadataExtractor.extract(filePath);
+  metadata = metadataExtractor.extractFromContent(cleanedText, metadata);
+  metadata.caseName = caseName || metadata.caseName;
+
+  /* Step 4: Chunk text */
+  const chunks = chunker.chunk(cleanedText);
+  if (chunks.length === 0) {
+    throw new ExtractionError('No chunks produced from text');
+  }
+
+  /* Step 5: Generate embeddings (slow — API calls in batches) */
+  const texts = chunks.map((c) => c.text);
+  const embeddings = await embedder.embedBatch(texts, true);
+
+  /* Step 6: Ensure DB vector column matches embedding dimensions */
+  if (embeddings.length > 0 && embeddings[0].length > 0) {
+    await reembedder.ensureColumnDimensions(embeddings[0].length);
+  }
+
+  /* Step 7: Save to DB (fast — use transaction only here) */
   return sequelize.transaction(async (transaction) => {
-    /* Extract text */
-    const extraction = await textExtractor.extract(filePath);
-    if (!extraction.success) {
-      throw new ExtractionError(extraction.error || 'Text extraction failed');
-    }
-
-    /* Clean text */
-    const cleanedText = textCleaner.clean(extraction.text);
-    if (cleanedText.length === 0) {
-      throw new ExtractionError('No text content after cleaning');
-    }
-
-    /* Extract metadata */
-    let metadata = metadataExtractor.extract(filePath);
-    metadata = metadataExtractor.extractFromContent(cleanedText, metadata);
-    metadata.caseName = caseName || metadata.caseName;
-
-    /* Chunk text */
-    const chunks = chunker.chunk(cleanedText);
-    if (chunks.length === 0) {
-      throw new ExtractionError('No chunks produced from text');
-    }
-
-    /* Generate embeddings */
-    const texts = chunks.map((c) => c.text);
-    const embeddings = await embedder.embedBatch(texts, true);
-
-    /* Ensure DB vector column matches embedding dimensions */
-    if (embeddings.length > 0 && embeddings[0].length > 0) {
-      await reembedder.ensureColumnDimensions(embeddings[0].length);
-    }
-
-    /* Save document */
     const document = await Document.create({
       caseName: metadata.caseName,
       caseFolder: metadata.caseFolder,
@@ -170,7 +176,7 @@ async function _processSingleFile(filePath, caseName, originalName) {
       isProcessed: true,
     }, { transaction });
 
-    /* Save chunks with embeddings */
+    /* Save chunks in batches to avoid huge single inserts */
     const chunkRecords = chunks.map((c, idx) => ({
       documentId: document.id,
       chunkText: c.text,
@@ -182,7 +188,11 @@ async function _processSingleFile(filePath, caseName, originalName) {
       metadataJson: metadata.extra,
     }));
 
-    await Chunk.bulkCreate(chunkRecords, { transaction });
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < chunkRecords.length; i += BATCH_SIZE) {
+      const batch = chunkRecords.slice(i, i + BATCH_SIZE);
+      await Chunk.bulkCreate(batch, { transaction });
+    }
 
     return { documentId: document.id, fileType: extraction.fileType, totalChunks: chunks.length };
   });

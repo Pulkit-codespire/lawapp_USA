@@ -16,10 +16,14 @@ const sequelize = new Sequelize(databaseUrl, {
   dialectModule: pg,
   logging: nodeEnv === 'development' ? (msg) => logger.debug(msg) : false,
   pool: {
-    min: 2,
-    max: 10,
+    min: 0,
+    max: 5,
     idle: 10000,
-    acquire: 30000,
+    acquire: 60000,
+    evict: 10000,
+  },
+  retry: {
+    max: 3,
   },
   dialectOptions: nodeEnv === 'production' ? {
     ssl: {
