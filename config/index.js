@@ -11,6 +11,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 
 const envSchema = Joi.object({
   OPENAI_API_KEY: Joi.string().required().description('OpenAI API key'),
+  GEMINI_API_KEY: Joi.string().optional().allow('').description('Google Gemini API key (optional)'),
   DATABASE_URL: Joi.string().uri().required().description('PostgreSQL connection URL'),
   CASE_FILES_ROOT: Joi.string().default('C:/legal_cases'),
   CHUNK_SIZE: Joi.number().integer().min(100).max(4000).default(800),
@@ -49,6 +50,9 @@ if (error) {
 const config = Object.freeze({
   openai: {
     apiKey: env.OPENAI_API_KEY,
+  },
+  gemini: {
+    apiKey: env.GEMINI_API_KEY || null,
   },
   database: {
     url: env.DATABASE_URL,

@@ -20,18 +20,36 @@ const { HTTP_STATUS, MAX_CHAT_HISTORY } = require('../utils/constants');
  * @param {import('express').Response} res
  */
 async function postChat(req, res) {
-  const { question, case_name: caseName, document_type: documentType } = req.body;
+  const {
+    question,
+    case_name: caseName,
+    document_type: documentType,
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    top_k: topK,
+    similarity_threshold: similarityThreshold,
+  } = req.body;
   const sessionId = req.body.session_id || uuidv4();
 
-  logger.info(`Chat request: "${question.slice(0, 80)}..." (session: ${sessionId})`);
+  /* Build per-request AI config overrides */
+  const aiOverrides = {
+    ...(model && { model }),
+    ...(temperature !== undefined && { temperature }),
+    ...(maxTokens && { maxTokens }),
+    ...(topK && { topK }),
+    ...(similarityThreshold !== undefined && { similarityThreshold }),
+  };
 
-  /* Step 1: Hybrid search */
-  const chunks = await retriever.search(question, { caseName, documentType });
+  logger.info(`Chat request: "${question.slice(0, 80)}..." (session: ${sessionId}, model: ${model || 'default'})`);
+
+  /* Step 1: Hybrid search (with optional topK + threshold override) */
+  const chunks = await retriever.search(question, { caseName, documentType, topK, similarityThreshold });
 
   /* Step 2: Retrieval gate check */
-  const gateResult = retrievalGate.check(chunks);
+  const gateResult = retrievalGate.check(chunks, similarityThreshold);
   if (!gateResult.passed) {
-    return _sendNoDataResponse(res, sessionId, question, gateResult);
+    return _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides);
   }
 
   /* Step 3: Rerank */
@@ -40,8 +58,8 @@ async function postChat(req, res) {
   /* Step 4: Load chat history */
   const chatHistory = await _getChatHistory(sessionId);
 
-  /* Step 5: Generate answer */
-  const generated = await generator.generate(question, reranked, chatHistory);
+  /* Step 5: Generate answer (with optional model + temperature override) */
+  const generated = await generator.generate(question, reranked, chatHistory, aiOverrides);
 
   /* Step 6: Verify citations */
   const citationResult = citationChecker.verify(generated.answer, reranked);
@@ -75,9 +93,9 @@ async function postChat(req, res) {
  * @param {Object} gateResult
  * @private
  */
-async function _sendNoDataResponse(res, sessionId, question, gateResult) {
+async function _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides = {}) {
   const chatHistory = await _getChatHistory(sessionId);
-  const generated = await generator.generateGeneral(question, chatHistory);
+  const generated = await generator.generateGeneral(question, chatHistory, aiOverrides);
 
   await _saveChatHistory(sessionId, question, generated.answer, [], 0);
 

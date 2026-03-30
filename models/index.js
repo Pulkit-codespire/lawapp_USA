@@ -42,9 +42,10 @@ try {
 const Document = require('./Document')(sequelize);
 const Chunk = require('./Chunk')(sequelize);
 const ChatHistory = require('./ChatHistory')(sequelize);
+const Settings = require('./Settings')(sequelize);
 
 /* Set up associations */
-const models = { Document, Chunk, ChatHistory };
+const models = { Document, Chunk, ChatHistory, Settings };
 
 Object.values(models).forEach((model) => {
   if (typeof model.associate === 'function') {
@@ -71,25 +72,38 @@ async function initDb({ force = false } = {}) {
   await sequelize.sync({ force });
   logger.info(`Database tables synced (force: ${force})`);
 
-  /* Ensure embedding column is vector(1536) type if pgvector is available */
+  /* Ensure embedding column is vector type if pgvector is available */
   try {
     await sequelize.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'");
+
+    /* Determine target dimensions from saved settings */
+    let targetDims = 1536;
+    try {
+      const saved = await Settings.findOne({ where: { key: 'ai_config' } });
+      if (saved && saved.value && saved.value.embeddingModel) {
+        const reembedder = require('../services/reembedder');
+        targetDims = reembedder.getDimensions(saved.value.embeddingModel);
+      }
+    } catch {
+      /* Settings table may not exist yet on first run */
+    }
+
     const [results] = await sequelize.query(
       `SELECT data_type FROM information_schema.columns
        WHERE table_name = 'chunks' AND column_name = 'embedding'`
     );
 
     if (results.length === 0) {
-      logger.info('Adding embedding column as vector(1536)...');
-      await sequelize.query('ALTER TABLE chunks ADD COLUMN embedding vector(1536)');
+      logger.info(`Adding embedding column as vector(${targetDims})...`);
+      await sequelize.query(`ALTER TABLE chunks ADD COLUMN embedding vector(${targetDims})`);
       logger.info('Embedding column added');
     } else if (results[0].data_type !== 'USER-DEFINED') {
-      logger.info('Converting embedding column to vector(1536)...');
+      logger.info(`Converting embedding column to vector(${targetDims})...`);
       await sequelize.query('ALTER TABLE chunks DROP COLUMN embedding');
-      await sequelize.query('ALTER TABLE chunks ADD COLUMN embedding vector(1536)');
-      logger.info('Embedding column converted to vector(1536)');
+      await sequelize.query(`ALTER TABLE chunks ADD COLUMN embedding vector(${targetDims})`);
+      logger.info(`Embedding column converted to vector(${targetDims})`);
     } else {
-      logger.info('Embedding column already vector(1536)');
+      logger.info('Embedding column already exists as vector type');
     }
   } catch (err) {
     logger.warn(`pgvector embedding column setup skipped: ${err.message}`);
@@ -116,6 +130,7 @@ module.exports = {
   Document,
   Chunk,
   ChatHistory,
+  Settings,
   initDb,
   checkConnection,
 };

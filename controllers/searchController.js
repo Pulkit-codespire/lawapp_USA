@@ -134,4 +134,84 @@ async function deleteDocument(req, res) {
   });
 }
 
-module.exports = { searchDocuments, listDocuments, listCases, deleteDocument };
+/**
+ * Find and remove duplicate documents.
+ * Duplicates are detected by matching total_chunks count and similar file names.
+ * Keeps the first uploaded document and removes later duplicates.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ */
+async function removeDuplicates(req, res) {
+  const dryRun = req.query.dry_run === 'true';
+
+  const documents = await Document.findAll({
+    order: [['ingested_at', 'ASC']],
+    attributes: ['id', 'caseName', 'fileName', 'fileType', 'totalChunks'],
+  });
+
+  const seen = new Map();
+  const duplicates = [];
+
+  for (const doc of documents) {
+    /* Normalize file name: lowercase, remove [number] suffixes, trim spaces */
+    const normalized = doc.fileName
+      .toLowerCase()
+      .replace(/\[\d+\]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const key = `${doc.caseName}::${normalized}::${doc.totalChunks}`;
+
+    if (seen.has(key)) {
+      duplicates.push({
+        id: doc.id,
+        file_name: doc.fileName,
+        case_name: doc.caseName,
+        total_chunks: doc.totalChunks,
+        kept: seen.get(key),
+      });
+    } else {
+      seen.set(key, doc.fileName);
+    }
+  }
+
+  if (dryRun) {
+    return res.status(HTTP_STATUS.OK).json({
+      message: `Found ${duplicates.length} duplicate document(s). Use dry_run=false to delete.`,
+      dry_run: true,
+      duplicates_found: duplicates.length,
+      duplicates: duplicates.map((d) => ({
+        id: d.id,
+        file_name: d.file_name,
+        case_name: d.case_name,
+        total_chunks: d.total_chunks,
+        duplicate_of: d.kept,
+      })),
+    });
+  }
+
+  let totalChunksDeleted = 0;
+
+  for (const dup of duplicates) {
+    const chunksDeleted = await Chunk.destroy({ where: { documentId: dup.id } });
+    await Document.destroy({ where: { id: dup.id } });
+    totalChunksDeleted += chunksDeleted;
+    logger.info(`Removed duplicate: ${dup.file_name} (${dup.id}) — ${chunksDeleted} chunks deleted`);
+  }
+
+  logger.info(`Duplicate removal complete: ${duplicates.length} documents, ${totalChunksDeleted} chunks deleted`);
+
+  return res.status(HTTP_STATUS.OK).json({
+    message: `Removed ${duplicates.length} duplicate document(s) and ${totalChunksDeleted} chunk(s).`,
+    dry_run: false,
+    documents_removed: duplicates.length,
+    chunks_removed: totalChunksDeleted,
+    removed: duplicates.map((d) => ({
+      id: d.id,
+      file_name: d.file_name,
+      duplicate_of: d.kept,
+    })),
+  });
+}
+
+module.exports = { searchDocuments, listDocuments, listCases, deleteDocument, removeDuplicates };

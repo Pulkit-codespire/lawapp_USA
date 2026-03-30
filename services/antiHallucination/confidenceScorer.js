@@ -34,6 +34,21 @@ const CITATION_WARNING_PENALTY = 0.8;
  * @returns {ConfidenceResult}
  */
 function score(chunks, citationResult, answer) {
+  /* If the LLM itself says it couldn't find info, override to low confidence */
+  const { NO_DATA_PHRASES } = require('../../utils/constants');
+  const lowerAnswer = (answer || '').toLowerCase();
+  const aiAdmitsNoData = NO_DATA_PHRASES.some((phrase) => lowerAnswer.includes(phrase));
+
+  if (aiAdmitsNoData) {
+    logger.debug('Confidence override: LLM admitted no data found → low');
+    return {
+      level: 'low',
+      score: 0.2,
+      reason: 'The AI could not find a direct answer in your case files for this specific question.',
+      factors: {},
+    };
+  }
+
   const factors = _calculateFactors(chunks, citationResult);
   const weightedScore = _calculateWeightedScore(factors);
   const { level, reason } = _getLevelAndReason(weightedScore);

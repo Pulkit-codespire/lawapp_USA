@@ -7,6 +7,7 @@ const chatRoutes = require('./chatRoutes');
 const ingestRoutes = require('./ingestRoutes');
 const searchRoutes = require('./searchRoutes');
 const healthRoutes = require('./healthRoutes');
+const settingsRoutes = require('./settingsRoutes');
 
 /**
  * Mount all routers on the Express app.
@@ -17,6 +18,7 @@ function registerRoutes(app) {
   app.use(ingestRoutes);
   app.use(searchRoutes);
   app.use(healthRoutes);
+  app.use(settingsRoutes);
 }
 
 module.exports = { registerRoutes };

@@ -15,5 +15,6 @@ router.get('/search', searchValidation, handleValidationErrors, asyncHandler(sea
 router.get('/search/documents', documentsValidation, handleValidationErrors, asyncHandler(searchController.listDocuments));
 router.get('/search/cases', asyncHandler(searchController.listCases));
 router.delete('/search/documents/:id', asyncHandler(searchController.deleteDocument));
+router.post('/search/remove-duplicates', asyncHandler(searchController.removeDuplicates));
 
 module.exports = router;

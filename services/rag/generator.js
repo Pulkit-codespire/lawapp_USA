@@ -1,15 +1,28 @@
 /**
  * @module services/rag/generator
- * @description Answer generation using OpenAI GPT-4o with legal system prompt.
+ * @description Answer generation using OpenAI or Google Gemini with legal system prompt.
  */
 
 const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const config = require('../../config');
 const logger = require('../../config/logger');
 const { NO_DATA_PHRASES, MAX_CHAT_HISTORY } = require('../../utils/constants');
 const { ExternalServiceError } = require('../../utils/errors');
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey });
+const geminiClient = config.gemini?.apiKey
+  ? new GoogleGenerativeAI(config.gemini.apiKey)
+  : null;
+
+/**
+ * Check if a model name belongs to Gemini.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function _isGeminiModel(model) {
+  return model.startsWith('gemini');
+}
 
 /** Legal system prompt enforcing grounded answers */
 const LEGAL_SYSTEM_PROMPT = `You are a legal research assistant. You help lawyers find information from their case files.
@@ -40,24 +53,30 @@ CRITICAL RULES:
  * @param {Array} [chatHistory=[]] - Previous conversation messages
  * @returns {Promise<GeneratedAnswer>}
  */
-async function generate(query, chunks, chatHistory = []) {
+async function generate(query, chunks, chatHistory = [], aiOverrides = {}) {
   const context = _buildContext(chunks);
   const messages = _buildMessages(query, context, chatHistory);
 
-  try {
-    const response = await openai.chat.completions.create({
-      model: config.chat.model,
-      messages,
-      max_tokens: config.chat.maxTokens,
-      temperature: config.chat.temperature,
-    });
+  const model = aiOverrides.model || config.chat.model;
+  const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
+  const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : config.chat.temperature;
 
-    const answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
-    const tokensUsed = response.usage?.total_tokens || 0;
+  try {
+    let answer;
+    let tokensUsed = 0;
+
+    if (_isGeminiModel(model)) {
+      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+    } else {
+      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
+      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
+      tokensUsed = response.usage?.total_tokens || 0;
+    }
+
     const sources = _extractSources(chunks);
     const { confidence, confidenceScore } = _assessConfidence(chunks, answer);
 
-    logger.info(`Generated answer: ${answer.length} chars, ${tokensUsed} tokens, confidence: ${confidence}`);
+    logger.info(`Generated answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}, confidence: ${confidence}`);
 
     return {
       answer,
@@ -68,7 +87,7 @@ async function generate(query, chunks, chatHistory = []) {
       model: config.chat.model,
     };
   } catch (err) {
-    throw new ExternalServiceError(`OpenAI generation failed: ${err.message}`);
+    throw new ExternalServiceError(`LLM generation failed (${model}): ${err.message}`);
   }
 }
 
@@ -131,7 +150,7 @@ function _extractSources(chunks) {
       page_number: chunk.pageNumber,
       section: chunk.section,
       document_type: chunk.documentType,
-      relevance_score: Math.round(chunk.similarity * 100) / 100,
+      relevance_score: Math.min(1.0, Math.round(chunk.similarity * 100) / 100),
       snippet: chunk.text.slice(0, 200),
     }));
 }
@@ -194,7 +213,7 @@ IMPORTANT CONTEXT:
  * @param {Array} [chatHistory=[]] - Previous conversation messages
  * @returns {Promise<GeneratedAnswer>}
  */
-async function generateGeneral(query, chatHistory = []) {
+async function generateGeneral(query, chatHistory = [], aiOverrides = {}) {
   const messages = [{ role: 'system', content: GENERAL_SYSTEM_PROMPT }];
 
   const recentHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
@@ -204,18 +223,23 @@ async function generateGeneral(query, chatHistory = []) {
 
   messages.push({ role: 'user', content: query });
 
+  const model = aiOverrides.model || config.chat.model;
+  const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
+  const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : config.chat.temperature;
+
   try {
-    const response = await openai.chat.completions.create({
-      model: config.chat.model,
-      messages,
-      max_tokens: config.chat.maxTokens,
-      temperature: config.chat.temperature,
-    });
+    let answer;
+    let tokensUsed = 0;
 
-    const answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
-    const tokensUsed = response.usage?.total_tokens || 0;
+    if (_isGeminiModel(model)) {
+      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+    } else {
+      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
+      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
+      tokensUsed = response.usage?.total_tokens || 0;
+    }
 
-    logger.info(`General answer: ${answer.length} chars, ${tokensUsed} tokens`);
+    logger.info(`General answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
 
     return {
       answer,
@@ -226,8 +250,67 @@ async function generateGeneral(query, chatHistory = []) {
       model: config.chat.model,
     };
   } catch (err) {
-    throw new ExternalServiceError(`OpenAI generation failed: ${err.message}`);
+    throw new ExternalServiceError(`LLM generation failed (${model}): ${err.message}`);
   }
+}
+
+/**
+ * Generate an answer using Google Gemini API.
+ * Converts OpenAI-style messages array to Gemini format.
+ * @param {string} model - Gemini model name
+ * @param {Array} messages - OpenAI-style messages array
+ * @param {number} maxTokens
+ * @param {number} temperature
+ * @returns {Promise<{answer: string, tokensUsed: number}>}
+ * @private
+ */
+async function _generateWithGemini(model, messages, maxTokens, temperature) {
+  if (!geminiClient) {
+    throw new ExternalServiceError('GEMINI_API_KEY is not configured. Add it to your .env file.');
+  }
+
+  /* Separate system prompt from conversation */
+  const systemMsg = messages.find((m) => m.role === 'system');
+  const conversation = messages.filter((m) => m.role !== 'system');
+
+  const geminiModel = geminiClient.getGenerativeModel({
+    model,
+    systemInstruction: systemMsg?.content || '',
+    generationConfig: {
+      maxOutputTokens: maxTokens,
+      temperature,
+    },
+  });
+
+  /* Convert OpenAI message format to Gemini history format */
+  let history = conversation.slice(0, -1).map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+
+  /* Gemini requires first message to be 'user' — drop leading model messages */
+  while (history.length > 0 && history[0].role === 'model') {
+    history.shift();
+  }
+
+  /* Gemini requires alternating user/model — merge consecutive same-role messages */
+  history = history.reduce((acc, msg) => {
+    if (acc.length > 0 && acc[acc.length - 1].role === msg.role) {
+      acc[acc.length - 1].parts[0].text += '\n\n' + msg.parts[0].text;
+    } else {
+      acc.push(msg);
+    }
+    return acc;
+  }, []);
+
+  const lastMessage = conversation[conversation.length - 1]?.content || '';
+
+  const chat = geminiModel.startChat({ history });
+  const result = await chat.sendMessage(lastMessage);
+  const answer = result.response.text() || 'Unable to generate a response.';
+  const tokensUsed = result.response.usageMetadata?.totalTokenCount || 0;
+
+  return { answer, tokensUsed };
 }
 
 module.exports = { generate, generateGeneral };

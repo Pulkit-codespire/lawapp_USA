@@ -64,14 +64,18 @@ async function search(query, options = {}) {
   const hasPgvector = await _checkPgvector();
 
   if (hasPgvector) {
-    const [vectorResults, keywordResults] = await Promise.all([
-      vectorSearch(query, topK, options.caseName, options.documentType),
-      keywordSearch(query, topK, options.caseName, options.documentType),
-    ]);
-
-    const merged = _mergeResults(vectorResults, keywordResults, topK);
-    logger.info(`Hybrid search: ${vectorResults.length} vector + ${keywordResults.length} keyword → ${merged.length} merged`);
-    return merged;
+    try {
+      const [vectorResults, keywordResults] = await Promise.all([
+        vectorSearch(query, topK, options.caseName, options.documentType),
+        keywordSearch(query, topK, options.caseName, options.documentType),
+      ]);
+      const merged = _mergeResults(vectorResults, keywordResults, topK);
+      logger.info(`Hybrid search: ${vectorResults.length} vector + ${keywordResults.length} keyword → ${merged.length} merged`);
+      return merged;
+    } catch (embeddingErr) {
+      /* Embedding failed (invalid API key, quota exceeded, etc.) — fall back to keyword search */
+      logger.warn(`Vector search failed (${embeddingErr.message}) — falling back to keyword-only search`);
+    }
   }
 
   /* Keyword-only fallback */
@@ -127,8 +131,48 @@ async function vectorSearch(query, topK, caseName, documentType) {
  * @returns {Promise<RetrievedChunk[]>}
  */
 async function keywordSearch(query, topK, caseName, documentType) {
+  const STOP_WORDS = new Set([
+    'the', 'and', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'whom',
+    'this', 'that', 'these', 'those', 'have', 'has', 'had', 'been', 'being',
+    'will', 'would', 'could', 'should', 'may', 'might', 'shall', 'can',
+    'did', 'does', 'done', 'say', 'said', 'his', 'her', 'its', 'our', 'your',
+    'they', 'them', 'their', 'are', 'for', 'from', 'with', 'about', 'into',
+    'how', 'all', 'any', 'but', 'not', 'you', 'she', 'him', 'also', 'just',
+    'get', 'got', 'give', 'gave', 'make', 'made', 'take', 'took', 'come',
+    'tell', 'told', 'know', 'knew', 'think', 'thought', 'see', 'saw',
+    'complete', 'please', 'show', 'find', 'list', 'summarize', 'explain',
+  ]);
+
+  const words = query
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w.toLowerCase()));
+
+  if (words.length === 0) {
+    /* If all words were stop words, use original query with plainto_tsquery */
+    const tsvector = sequelize.fn('to_tsvector', 'english', sequelize.col('Chunk.chunk_text'));
+    const tsquery = sequelize.fn('plainto_tsquery', 'english', query);
+    const rank = sequelize.fn('ts_rank', tsvector, tsquery);
+    const where = sequelize.where(tsvector, '@@', tsquery);
+    const includeWhere = _buildIncludeWhere(caseName, documentType);
+
+    const chunks = await Chunk.findAll({
+      attributes: { include: [[rank, 'rank']] },
+      include: [{ model: Document, as: 'document', attributes: ['caseName', 'fileName', 'documentType'], where: Object.keys(includeWhere).length > 0 ? includeWhere : undefined }],
+      where, order: [[sequelize.literal('rank'), 'DESC']], limit: topK, raw: false, nest: true,
+    });
+
+    return chunks.map((c, idx) => {
+      const result = _mapChunkToResult(c);
+      result.similarity = Math.min(0.75, Math.max(0.4, 0.75 - (idx * 0.03)));
+      return result;
+    });
+  }
+
+  const orQuery = words.map((w) => w.toLowerCase()).join(' | ');
+
   const tsvector = sequelize.fn('to_tsvector', 'english', sequelize.col('Chunk.chunk_text'));
-  const tsquery = sequelize.fn('plainto_tsquery', 'english', query);
+  const tsquery = sequelize.fn('to_tsquery', 'english', orQuery);
   const rank = sequelize.fn('ts_rank', tsvector, tsquery);
 
   const where = sequelize.where(tsvector, '@@', tsquery);
@@ -153,7 +197,8 @@ async function keywordSearch(query, topK, caseName, documentType) {
 
   return chunks.map((c, idx) => {
     const result = _mapChunkToResult(c);
-    result.similarity = Math.max(0.5, 1 - (idx * 0.05));
+    /* Cap keyword-only scores at 0.75 — they're not real vector similarity */
+    result.similarity = Math.min(0.75, Math.max(0.4, 0.75 - (idx * 0.03)));
     return result;
   });
 }
