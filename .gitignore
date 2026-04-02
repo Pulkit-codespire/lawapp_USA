@@ -5,3 +5,5 @@ uploads/
 temp/
 *.log
 eng.traineddata
+service-account.json
+*.credentials.json

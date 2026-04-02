@@ -64,7 +64,7 @@ async function listDocuments(req, res) {
     offset: parseInt(skip, 10),
     limit: parseInt(limit, 10),
     order: [['ingested_at', 'DESC']],
-    attributes: ['id', 'caseName', 'fileName', 'fileType', 'documentType', 'totalChunks', 'isProcessed'],
+    attributes: ['id', 'caseName', 'fileName', 'filePath', 'fileType', 'documentType', 'totalChunks', 'isProcessed'],
   });
 
   return res.status(HTTP_STATUS.OK).json({
@@ -77,6 +77,7 @@ async function listDocuments(req, res) {
       document_type: d.documentType,
       total_chunks: d.totalChunks,
       is_processed: d.isProcessed,
+      source: d.filePath?.startsWith('gdrive://') ? 'google_drive' : 'upload',
     })),
   });
 }

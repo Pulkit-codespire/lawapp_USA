@@ -4,13 +4,14 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
-const { ChatHistory } = require('../models');
+const { ChatHistory, ChatSession } = require('../models');
 const retriever = require('../services/rag/retriever');
 const generator = require('../services/rag/generator');
 const reranker = require('../services/rag/reranker');
 const retrievalGate = require('../services/antiHallucination/retrievalGate');
 const citationChecker = require('../services/antiHallucination/citationChecker');
 const confidenceScorer = require('../services/antiHallucination/confidenceScorer');
+const queryClassifier = require('../services/queryClassifier');
 const logger = require('../config/logger');
 const { HTTP_STATUS, MAX_CHAT_HISTORY } = require('../utils/constants');
 
@@ -43,34 +44,107 @@ async function postChat(req, res) {
 
   logger.info(`Chat request: "${question.slice(0, 80)}..." (session: ${sessionId}, model: ${model || 'default'})`);
 
-  /* Step 1: Hybrid search (with optional topK + threshold override) */
-  const chunks = await retriever.search(question, { caseName, documentType, topK, similarityThreshold });
+  /* ── Step 1: Classify intent ── */
+  const { intent } = await queryClassifier.classify(question, model);
+  logger.info(`Intent: ${intent}`);
 
-  /* Step 2: Retrieval gate check */
-  const gateResult = retrievalGate.check(chunks, similarityThreshold);
-  if (!gateResult.passed) {
-    return _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides);
+  /* ── Step 2: Route based on intent ── */
+
+  /* LEGAL ADVICE — pure UK law strategy, no document search needed */
+  if (intent === 'legal_advice') {
+    const chatHistory = await _getChatHistory(sessionId);
+    const generated = await generator.generateLegalAdvice(question, chatHistory, aiOverrides);
+
+    await _saveChatHistory(sessionId, question, generated.answer, [], 0);
+    await _updateSessionTitle(sessionId, question);
+
+    return res.status(HTTP_STATUS.OK).json({
+      answer: generated.answer,
+      sources: [],
+      confidence: 'advice',
+      confidence_score: 0,
+      confidence_reason: 'UK legal strategy advice based on AI knowledge of UK law.',
+      session_id: sessionId,
+      tokens_used: generated.tokensUsed,
+      intent,
+      warnings: ['This is AI-generated UK legal strategy guidance. Always verify with current legislation and consult the instructed lawyer.'],
+    });
   }
 
-  /* Step 3: Rerank */
+  /* GENERAL — pure UK law knowledge question */
+  if (intent === 'general') {
+    const chatHistory = await _getChatHistory(sessionId);
+    const generated = await generator.generateUKGeneral(question, chatHistory, aiOverrides);
+
+    await _saveChatHistory(sessionId, question, generated.answer, [], 0);
+    await _updateSessionTitle(sessionId, question);
+
+    return res.status(HTTP_STATUS.OK).json({
+      answer: generated.answer,
+      sources: [],
+      confidence: 'general',
+      confidence_score: 0,
+      confidence_reason: 'General UK law knowledge. Not from your case files.',
+      session_id: sessionId,
+      tokens_used: generated.tokensUsed,
+      intent,
+      warnings: ['This answer is based on AI knowledge of UK law, NOT your case files. Verify on legislation.gov.uk.'],
+    });
+  }
+
+  /* CASE_QUERY or HYBRID — both need document search */
+  const chunks = await retriever.search(question, { caseName, documentType, topK, similarityThreshold });
+
+  /* Retrieval gate check */
+  const gateResult = retrievalGate.check(chunks, similarityThreshold);
+
+  if (!gateResult.passed) {
+    /* No docs found — for hybrid, still give UK law advice; for case_query, fallback */
+    if (intent === 'hybrid') {
+      const chatHistory = await _getChatHistory(sessionId);
+      const generated = await generator.generateHybrid(question, [], chatHistory, aiOverrides);
+
+      await _saveChatHistory(sessionId, question, generated.answer, [], 0);
+      await _updateSessionTitle(sessionId, question);
+
+      return res.status(HTTP_STATUS.OK).json({
+        answer: generated.answer,
+        sources: [],
+        confidence: 'general',
+        confidence_score: 0,
+        confidence_reason: 'No matching case files found. Answered with UK law knowledge only.',
+        session_id: sessionId,
+        tokens_used: generated.tokensUsed,
+        intent,
+        warnings: ['No relevant case documents found. This analysis uses UK law knowledge only — upload relevant documents for case-specific advice.'],
+      });
+    }
+    /* case_query with no docs — original fallback */
+    return _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides, intent);
+  }
+
+  /* Rerank */
   const reranked = reranker.rerank(chunks, question);
 
-  /* Step 4: Load chat history */
+  /* Load chat history */
   const chatHistory = await _getChatHistory(sessionId);
 
-  /* Step 5: Generate answer (with optional model + temperature override) */
-  const generated = await generator.generate(question, reranked, chatHistory, aiOverrides);
+  /* Generate answer — hybrid uses UK law + docs, case_query uses docs only */
+  const generated = intent === 'hybrid'
+    ? await generator.generateHybrid(question, reranked, chatHistory, aiOverrides)
+    : await generator.generate(question, reranked, chatHistory, aiOverrides);
 
-  /* Step 6: Verify citations */
+  /* Verify citations */
   const citationResult = citationChecker.verify(generated.answer, reranked);
 
-  /* Step 7: Score confidence */
+  /* Score confidence */
   const confidence = confidenceScorer.score(reranked, citationResult, generated.answer);
 
-  /* Step 8: Save to history */
+  /* Save to history */
   await _saveChatHistory(sessionId, question, generated.answer, generated.sources, confidence.score);
+  await _updateSessionTitle(sessionId, question);
 
-  /* Step 9: Build response */
+  /* Build response */
   const warnings = citationResult.warnings || [];
 
   return res.status(HTTP_STATUS.OK).json({
@@ -81,6 +155,7 @@ async function postChat(req, res) {
     confidence_reason: confidence.reason,
     session_id: sessionId,
     tokens_used: generated.tokensUsed,
+    intent,
     warnings,
   });
 }
@@ -93,21 +168,23 @@ async function postChat(req, res) {
  * @param {Object} gateResult
  * @private
  */
-async function _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides = {}) {
+async function _sendNoDataResponse(res, sessionId, question, gateResult, aiOverrides = {}, intent = 'case_query') {
   const chatHistory = await _getChatHistory(sessionId);
-  const generated = await generator.generateGeneral(question, chatHistory, aiOverrides);
+  const generated = await generator.generateUKGeneral(question, chatHistory, aiOverrides);
 
   await _saveChatHistory(sessionId, question, generated.answer, [], 0);
+  await _updateSessionTitle(sessionId, question);
 
   return res.status(HTTP_STATUS.OK).json({
     answer: generated.answer,
     sources: [],
     confidence: 'general',
     confidence_score: 0,
-    confidence_reason: 'No case files found. Answered from AI general legal knowledge.',
+    confidence_reason: 'No matching case files found. Answered from UK law knowledge.',
     session_id: sessionId,
     tokens_used: generated.tokensUsed,
-    warnings: ['This answer is based on general AI knowledge, NOT your case files. Verify independently.'],
+    intent,
+    warnings: ['No relevant case documents found. This answer uses general UK law knowledge. Upload case files for case-specific answers.'],
   });
 }
 
@@ -142,6 +219,33 @@ async function _saveChatHistory(sessionId, question, answer, sources, confidence
     { sessionId, role: 'user', content: question },
     { sessionId, role: 'assistant', content: answer, sourceChunks: sources, confidenceScore },
   ]);
+}
+
+/**
+ * Update session title to the first question (if still default).
+ * Also touch updated_at to keep recent order.
+ * @param {string} sessionId
+ * @param {string} question
+ * @private
+ */
+async function _updateSessionTitle(sessionId, question) {
+  try {
+    const session = await ChatSession.findByPk(sessionId);
+    if (!session) return;
+
+    /* Set title from first question */
+    if (session.title === 'New conversation') {
+      const title = question.length > 80 ? question.slice(0, 80) + '...' : question;
+      session.title = title;
+    }
+
+    /* Touch updated_at */
+    session.changed('updatedAt', true);
+    await session.save();
+  } catch (err) {
+    /* Non-critical — don't fail the chat response */
+    logger.warn(`Failed to update session title: ${err.message}`);
+  }
 }
 
 module.exports = { postChat };

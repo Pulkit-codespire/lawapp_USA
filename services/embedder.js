@@ -12,6 +12,7 @@ const config = require('../config');
 const logger = require('../config/logger');
 const { RETRY_CONFIG, CONCURRENT_EMBED_LIMIT } = require('../utils/constants');
 const { ExternalServiceError } = require('../utils/errors');
+const { trackUsage } = require('./usageTracker');
 
 const openai = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
 const geminiClient = config.gemini?.apiKey ? new GoogleGenerativeAI(config.gemini.apiKey) : null;
@@ -165,7 +166,16 @@ async function embedBatch(texts, showProgress = false) {
 
   if (isGemini) {
     /* Gemini doesn't support batch embedding — process one at a time with concurrency */
-    return _batchWithConcurrency(texts, model, isGemini, showProgress);
+    const geminiResults = await _batchWithConcurrency(texts, model, isGemini, showProgress);
+    const estTokens = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0);
+    trackUsage({
+      operation: 'embedding',
+      model,
+      inputTokens: estTokens,
+      totalTokens: estTokens,
+      metadata: { textCount: texts.length, batchMode: 'gemini' },
+    });
+    return geminiResults;
   }
 
   /* OpenAI supports batch embedding */
@@ -194,6 +204,16 @@ async function embedBatch(texts, showProgress = false) {
   const results = await Promise.all(batchPromises);
   results.sort((a, b) => a.index - b.index);
   results.forEach((r) => allEmbeddings.push(...r.embeddings));
+
+  /* Track embedding usage — estimate ~4 tokens per text chunk avg */
+  const estTokens = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0);
+  trackUsage({
+    operation: 'embedding',
+    model,
+    inputTokens: estTokens,
+    totalTokens: estTokens,
+    metadata: { textCount: texts.length, batchMode: 'openai' },
+  });
 
   return allEmbeddings;
 }

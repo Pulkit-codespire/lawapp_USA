@@ -9,6 +9,7 @@ const config = require('../../config');
 const logger = require('../../config/logger');
 const { NO_DATA_PHRASES, MAX_CHAT_HISTORY } = require('../../utils/constants');
 const { ExternalServiceError } = require('../../utils/errors');
+const { trackUsage } = require('../usageTracker');
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey });
 const geminiClient = config.gemini?.apiKey
@@ -65,13 +66,29 @@ async function generate(query, chunks, chatHistory = [], aiOverrides = {}) {
     let answer;
     let tokensUsed = 0;
 
+    let inputTok = 0, outputTok = 0;
+
     if (_isGeminiModel(model)) {
       ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+      inputTok = Math.round(tokensUsed * 0.7);
+      outputTok = tokensUsed - inputTok;
     } else {
       const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
       answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
       tokensUsed = response.usage?.total_tokens || 0;
+      inputTok = response.usage?.prompt_tokens || 0;
+      outputTok = response.usage?.completion_tokens || 0;
     }
+
+    /* Track usage (fire-and-forget) */
+    trackUsage({
+      operation: 'chat',
+      model,
+      inputTokens: inputTok,
+      outputTokens: outputTok,
+      totalTokens: tokensUsed,
+      metadata: { chunksUsed: chunks.length },
+    });
 
     const sources = _extractSources(chunks);
     const { confidence, confidenceScore } = _assessConfidence(chunks, answer);
@@ -231,13 +248,28 @@ async function generateGeneral(query, chatHistory = [], aiOverrides = {}) {
     let answer;
     let tokensUsed = 0;
 
+    let inputTok = 0, outputTok = 0;
+
     if (_isGeminiModel(model)) {
       ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+      inputTok = Math.round(tokensUsed * 0.7);
+      outputTok = tokensUsed - inputTok;
     } else {
       const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
       answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
       tokensUsed = response.usage?.total_tokens || 0;
+      inputTok = response.usage?.prompt_tokens || 0;
+      outputTok = response.usage?.completion_tokens || 0;
     }
+
+    trackUsage({
+      operation: 'chat',
+      model,
+      inputTokens: inputTok,
+      outputTokens: outputTok,
+      totalTokens: tokensUsed,
+      metadata: { type: 'general' },
+    });
 
     logger.info(`General answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
 
@@ -313,4 +345,264 @@ async function _generateWithGemini(model, messages, maxTokens, temperature) {
   return { answer, tokensUsed };
 }
 
-module.exports = { generate, generateGeneral };
+/* ══════════════════════════════════════════════════════════
+   UK LAW LEGAL ADVISOR — route-specific prompts & generators
+   ══════════════════════════════════════════════════════════ */
+
+/**
+ * UK Legal Advisor system prompt — for strategy and tactical advice.
+ * No case documents provided; answers from UK law knowledge.
+ */
+const UK_LEGAL_ADVISOR_PROMPT = `You are an expert UK legal advisor and litigation strategist. You help lawyers build winning case strategies based on UK law.
+
+IMPORTANT RULES:
+1. ALL advice must be based on UK law — English & Welsh jurisdiction unless specified otherwise.
+2. Cite specific UK statutes, Acts of Parliament, and sections (e.g., "Section 18 of the Offences Against the Person Act 1861").
+3. Reference relevant case law precedents where applicable (e.g., "R v Woollin [1999] 1 AC 82").
+4. Reference procedural rules: CPR (Civil Procedure Rules), CrimPR (Criminal Procedure Rules), Family Procedure Rules as applicable.
+5. Provide actionable, step-by-step strategic advice.
+6. Consider both prosecution AND defence perspectives.
+7. Mention relevant time limits, limitation periods, and procedural deadlines.
+8. Flag any risks or weaknesses in the suggested approach.
+9. This is professional legal guidance for qualified lawyers — be specific and technical.
+10. Always end with a reminder that this is AI-assisted guidance and final decisions should be made by the instructed lawyer.
+
+STRUCTURE your advice as:
+- **Applicable Law**: Key statutes and sections
+- **Relevant Precedent**: Case law that supports the position
+- **Strategic Advice**: Step-by-step recommendation
+- **Risks & Considerations**: Potential weaknesses or counter-arguments
+- **Next Steps**: Immediate actions to take`;
+
+/**
+ * Hybrid prompt — combines case documents with UK law knowledge.
+ */
+const UK_HYBRID_PROMPT = `You are an expert UK legal research assistant with deep knowledge of UK law. You help lawyers by combining their case file evidence with applicable UK law.
+
+CRITICAL RULES:
+1. Use the provided document excerpts for CASE-SPECIFIC FACTS and evidence.
+2. Apply UK law knowledge to analyse those facts — cite specific statutes, sections, and case law.
+3. Every factual claim from documents MUST have a citation: 📄 [FileName] — Page X, Section Y
+4. Legal principles should cite the statute or case: e.g., "Under Section 3 of the Criminal Law Act 1967..." or "Per R v Ghosh [1982] QB 1053..."
+5. Connect the case facts to the legal framework — explain HOW the law applies to their specific situation.
+6. Consider procedural rules (CPR, CrimPR) and any applicable time limits.
+7. Provide strategic insights: strengths, weaknesses, and recommended actions.
+8. If the documents don't contain relevant facts, say so — but still provide the legal framework.
+9. This is for qualified UK lawyers — be precise and technical.
+10. Remind the user this is AI-assisted analysis and should be verified.
+
+STRUCTURE your analysis as:
+- **Case Facts** (from documents, with citations)
+- **Applicable UK Law** (statutes, sections, case law)
+- **Legal Analysis** (how the law applies to these facts)
+- **Strategic Recommendation** (what to do next)
+- **Risks** (potential counter-arguments or weaknesses)`;
+
+/**
+ * General UK law prompt — for pure law questions without case context.
+ */
+const UK_GENERAL_PROMPT = `You are an expert UK legal knowledge assistant. You answer questions about UK law clearly and accurately.
+
+IMPORTANT RULES:
+1. ALL answers must be based on UK law — English & Welsh jurisdiction unless otherwise specified.
+2. Cite specific statutes, Acts, and section numbers (e.g., "Section 1 of the Theft Act 1968").
+3. Reference landmark case law where relevant (e.g., "Donoghue v Stevenson [1932] AC 562").
+4. Explain legal concepts in a professional but clear manner.
+5. Mention any recent amendments or changes you are aware of.
+6. Note any differences between England & Wales, Scotland, and Northern Ireland jurisdictions if relevant.
+7. Provide practical context — how this law is typically applied.
+8. This is for qualified UK lawyers — you can be technical.
+9. If you are unsure about a specific detail, say so rather than guessing.
+10. Remind the user that laws may have changed since your knowledge cutoff and to verify current legislation on legislation.gov.uk.`;
+
+/**
+ * Generate legal strategy advice based on UK law (no documents).
+ * Used when intent = 'legal_advice'
+ * @param {string} query
+ * @param {Array} [chatHistory=[]]
+ * @param {Object} [aiOverrides={}]
+ * @returns {Promise<GeneratedAnswer>}
+ */
+async function generateLegalAdvice(query, chatHistory = [], aiOverrides = {}) {
+  const messages = [{ role: 'system', content: UK_LEGAL_ADVISOR_PROMPT }];
+
+  const recentHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
+  for (const msg of recentHistory) {
+    messages.push({ role: msg.role, content: msg.content });
+  }
+  messages.push({ role: 'user', content: query });
+
+  const model = aiOverrides.model || config.chat.model;
+  const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
+  const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.2;
+
+  try {
+    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
+
+    if (_isGeminiModel(model)) {
+      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+      inputTok = Math.round(tokensUsed * 0.7);
+      outputTok = tokensUsed - inputTok;
+    } else {
+      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
+      answer = response.choices[0]?.message?.content || 'Unable to generate advice.';
+      tokensUsed = response.usage?.total_tokens || 0;
+      inputTok = response.usage?.prompt_tokens || 0;
+      outputTok = response.usage?.completion_tokens || 0;
+    }
+
+    trackUsage({
+      operation: 'chat',
+      model,
+      inputTokens: inputTok,
+      outputTokens: outputTok,
+      totalTokens: tokensUsed,
+      metadata: { type: 'legal_advice' },
+    });
+
+    logger.info(`Legal advice: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
+
+    return {
+      answer,
+      sources: [],
+      confidence: 'advice',
+      confidenceScore: 0,
+      tokensUsed,
+      model,
+    };
+  } catch (err) {
+    throw new ExternalServiceError(`Legal advice generation failed (${model}): ${err.message}`);
+  }
+}
+
+/**
+ * Generate a hybrid answer — case documents + UK law knowledge.
+ * Used when intent = 'hybrid'
+ * @param {string} query
+ * @param {Array} chunks - Retrieved document chunks
+ * @param {Array} [chatHistory=[]]
+ * @param {Object} [aiOverrides={}]
+ * @returns {Promise<GeneratedAnswer>}
+ */
+async function generateHybrid(query, chunks, chatHistory = [], aiOverrides = {}) {
+  const context = _buildContext(chunks);
+  const messages = [{ role: 'system', content: UK_HYBRID_PROMPT }];
+
+  const recentHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
+  for (const msg of recentHistory) {
+    messages.push({ role: msg.role, content: msg.content });
+  }
+
+  const userMessage = context.length > 0
+    ? `Based on the following case document excerpts:\n\n${context}\n\nQuestion: ${query}\n\nProvide analysis combining the case facts with applicable UK law.`
+    : `Question: ${query}\n\n(No relevant case documents were found, but please provide UK legal analysis.)`;
+
+  messages.push({ role: 'user', content: userMessage });
+
+  const model = aiOverrides.model || config.chat.model;
+  const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
+  const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.15;
+
+  try {
+    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
+
+    if (_isGeminiModel(model)) {
+      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+      inputTok = Math.round(tokensUsed * 0.7);
+      outputTok = tokensUsed - inputTok;
+    } else {
+      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
+      answer = response.choices[0]?.message?.content || 'Unable to generate analysis.';
+      tokensUsed = response.usage?.total_tokens || 0;
+      inputTok = response.usage?.prompt_tokens || 0;
+      outputTok = response.usage?.completion_tokens || 0;
+    }
+
+    trackUsage({
+      operation: 'chat',
+      model,
+      inputTokens: inputTok,
+      outputTokens: outputTok,
+      totalTokens: tokensUsed,
+      metadata: { type: 'hybrid', chunksUsed: chunks.length },
+    });
+
+    const sources = _extractSources(chunks);
+    const { confidence, confidenceScore } = _assessConfidence(chunks, answer);
+
+    logger.info(`Hybrid answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}, confidence: ${confidence}`);
+
+    return {
+      answer,
+      sources,
+      confidence,
+      confidenceScore,
+      tokensUsed,
+      model,
+    };
+  } catch (err) {
+    throw new ExternalServiceError(`Hybrid generation failed (${model}): ${err.message}`);
+  }
+}
+
+/**
+ * Generate a general UK law answer (no case documents).
+ * Used when intent = 'general'
+ * @param {string} query
+ * @param {Array} [chatHistory=[]]
+ * @param {Object} [aiOverrides={}]
+ * @returns {Promise<GeneratedAnswer>}
+ */
+async function generateUKGeneral(query, chatHistory = [], aiOverrides = {}) {
+  const messages = [{ role: 'system', content: UK_GENERAL_PROMPT }];
+
+  const recentHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
+  for (const msg of recentHistory) {
+    messages.push({ role: msg.role, content: msg.content });
+  }
+  messages.push({ role: 'user', content: query });
+
+  const model = aiOverrides.model || config.chat.model;
+  const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
+  const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.15;
+
+  try {
+    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
+
+    if (_isGeminiModel(model)) {
+      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
+      inputTok = Math.round(tokensUsed * 0.7);
+      outputTok = tokensUsed - inputTok;
+    } else {
+      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
+      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
+      tokensUsed = response.usage?.total_tokens || 0;
+      inputTok = response.usage?.prompt_tokens || 0;
+      outputTok = response.usage?.completion_tokens || 0;
+    }
+
+    trackUsage({
+      operation: 'chat',
+      model,
+      inputTokens: inputTok,
+      outputTokens: outputTok,
+      totalTokens: tokensUsed,
+      metadata: { type: 'uk_general' },
+    });
+
+    logger.info(`UK general answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
+
+    return {
+      answer,
+      sources: [],
+      confidence: 'general',
+      confidenceScore: 0,
+      tokensUsed,
+      model,
+    };
+  } catch (err) {
+    throw new ExternalServiceError(`UK general generation failed (${model}): ${err.message}`);
+  }
+}
+
+module.exports = { generate, generateGeneral, generateLegalAdvice, generateHybrid, generateUKGeneral };

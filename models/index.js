@@ -43,13 +43,16 @@ try {
 }
 
 /* Initialize models */
+const User = require('./User')(sequelize);
 const Document = require('./Document')(sequelize);
 const Chunk = require('./Chunk')(sequelize);
+const ChatSession = require('./ChatSession')(sequelize);
 const ChatHistory = require('./ChatHistory')(sequelize);
 const Settings = require('./Settings')(sequelize);
+const UsageLog = require('./UsageLog')(sequelize);
 
 /* Set up associations */
-const models = { Document, Chunk, ChatHistory, Settings };
+const models = { User, Document, Chunk, ChatSession, ChatHistory, Settings, UsageLog };
 
 Object.values(models).forEach((model) => {
   if (typeof model.associate === 'function') {
@@ -131,10 +134,13 @@ async function checkConnection() {
 module.exports = {
   sequelize,
   Sequelize,
+  User,
   Document,
   Chunk,
+  ChatSession,
   ChatHistory,
   Settings,
+  UsageLog,
   initDb,
   checkConnection,
 };
