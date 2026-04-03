@@ -215,4 +215,48 @@ async function removeDuplicates(req, res) {
   });
 }
 
-module.exports = { searchDocuments, listDocuments, listCases, deleteDocument, removeDuplicates };
+/**
+ * Get document preview — returns chunk texts ordered by chunk_index.
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ */
+async function getDocumentPreview(req, res) {
+  const { id } = req.params;
+
+  const document = await Document.findByPk(id, {
+    attributes: ['id', 'caseName', 'fileName', 'fileType', 'documentType', 'totalPages', 'totalChunks', 'extractionMethod'],
+  });
+
+  if (!document) {
+    return res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Document not found' });
+  }
+
+  const chunks = await Chunk.findAll({
+    where: { documentId: id },
+    order: [['chunk_index', 'ASC']],
+    attributes: ['id', 'chunkText', 'chunkIndex', 'section', 'pageNumber', 'tokenCount'],
+  });
+
+  return res.status(HTTP_STATUS.OK).json({
+    document: {
+      id: document.id,
+      case_name: document.caseName,
+      file_name: document.fileName,
+      file_type: document.fileType,
+      document_type: document.documentType,
+      total_pages: document.totalPages,
+      total_chunks: document.totalChunks,
+      extraction_method: document.extractionMethod,
+    },
+    chunks: chunks.map((c) => ({
+      id: c.id,
+      text: c.chunkText,
+      chunk_index: c.chunkIndex,
+      section: c.section,
+      page_number: c.pageNumber,
+      token_count: c.tokenCount,
+    })),
+  });
+}
+
+module.exports = { searchDocuments, listDocuments, listCases, deleteDocument, removeDuplicates, getDocumentPreview };

@@ -53,6 +53,8 @@ async function extract(filePath) {
 
 /**
  * Extract text from a DOCX file using mammoth.
+ * Uses convertToHtml for full content extraction (captures text boxes, footnotes, etc.)
+ * then falls back to extractRawText. Uses whichever yields more content.
  * @param {string} filePath
  * @param {string} fileType
  * @returns {Promise<ExtractionResult>}
@@ -60,8 +62,42 @@ async function extract(filePath) {
  */
 async function _extractDocx(filePath, fileType) {
   const mammoth = require('mammoth');
-  const result = await mammoth.extractRawText({ path: filePath });
-  const text = result.value || '';
+
+  /* Try both extraction methods and use the one that produces more text */
+  const [rawResult, htmlResult] = await Promise.all([
+    mammoth.extractRawText({ path: filePath }),
+    mammoth.convertToHtml({ path: filePath }),
+  ]);
+
+  const rawText = rawResult.value || '';
+
+  /* Strip HTML tags to get plain text from the HTML conversion */
+  let htmlText = '';
+  if (htmlResult.value) {
+    htmlText = htmlResult.value
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n\n')
+      .replace(/<\/h[1-6]>/gi, '\n\n')
+      .replace(/<\/li>/gi, '\n')
+      .replace(/<\/tr>/gi, '\n')
+      .replace(/<\/td>/gi, '\t')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  /* Use whichever method extracted more content */
+  const text = htmlText.length > rawText.length ? htmlText : rawText;
+
+  if (htmlText.length > rawText.length) {
+    logger.info(`DOCX: HTML extraction yielded more content (${htmlText.length} vs ${rawText.length} chars)`);
+  }
 
   return {
     text,
@@ -75,6 +111,7 @@ async function _extractDocx(filePath, fileType) {
 
 /**
  * Extract text from a digital PDF using pdf-parse.
+ * Extracts per-page text with page markers so the chunker can track page numbers.
  * @param {string} filePath
  * @param {string} fileType
  * @returns {Promise<ExtractionResult>}
@@ -83,11 +120,52 @@ async function _extractDocx(filePath, fileType) {
 async function _extractPdfDigital(filePath, fileType) {
   const pdfParse = require('pdf-parse');
   const buffer = fs.readFileSync(filePath);
-  const data = await pdfParse(buffer);
+
+  /* Custom page renderer to capture per-page text with markers */
+  const pageTexts = [];
+  const options = {
+    pagerender: async function (pageData) {
+      const textContent = await pageData.getTextContent();
+      const strings = textContent.items.map((item) => item.str);
+      return strings.join(' ');
+    },
+  };
+
+  const data = await pdfParse(buffer, options);
+  const totalPages = data.numpages || 1;
+
+  /*
+   * pdf-parse concatenates all pages into data.text.
+   * To get per-page text, we re-parse with a page-collecting renderer.
+   */
+  let textWithPages = '';
+  try {
+    const perPageOptions = {
+      pagerender: async function (pageData) {
+        const textContent = await pageData.getTextContent();
+        const strings = textContent.items.map((item) => item.str);
+        const pageText = strings.join(' ').trim();
+        pageTexts.push(pageText);
+        return pageText;
+      },
+    };
+    await pdfParse(buffer, perPageOptions);
+
+    if (pageTexts.length > 1) {
+      textWithPages = pageTexts
+        .map((text, idx) => `--- Page ${idx + 1} ---\n${text}`)
+        .join('\n\n');
+    } else {
+      textWithPages = data.text || '';
+    }
+  } catch {
+    /* Fallback to plain text if per-page extraction fails */
+    textWithPages = data.text || '';
+  }
 
   return {
-    text: data.text || '',
-    totalPages: data.numpages || 1,
+    text: textWithPages,
+    totalPages,
     extractionMethod: 'pdf-parse',
     fileType,
     success: true,

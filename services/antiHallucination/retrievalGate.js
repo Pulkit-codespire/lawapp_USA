@@ -32,6 +32,21 @@ function check(chunks) {
   const maxSimilarity = Math.max(...chunks.map((c) => c.similarity));
 
   if (relevantChunks.length === 0) {
+    /*
+     * Use a lenient approach: if the best chunk is at least 50% of the threshold,
+     * pass with a warning rather than blocking entirely.
+     */
+    if (maxSimilarity >= similarityThreshold * 0.5 && chunks.length >= 2) {
+      logger.info(`Retrieval gate: PASSED (lenient) — max similarity ${maxSimilarity.toFixed(3)} is above 50% of threshold`);
+      return {
+        passed: true,
+        reason: `Found ${chunks.length} document(s) with moderate relevance.`,
+        numChunks: chunks.length,
+        avgSimilarity,
+        maxSimilarity,
+      };
+    }
+
     logger.warn(`Retrieval gate: BLOCKED — all chunks below threshold (max: ${maxSimilarity.toFixed(3)})`);
     return {
       passed: false,

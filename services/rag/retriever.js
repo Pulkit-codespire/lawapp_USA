@@ -164,7 +164,8 @@ async function keywordSearch(query, topK, caseName, documentType) {
 
     return chunks.map((c, idx) => {
       const result = _mapChunkToResult(c);
-      result.similarity = Math.min(0.75, Math.max(0.4, 0.75 - (idx * 0.03)));
+      /* Keyword scores are NOT vector similarity — keep them low so the gate can distinguish */
+      result.similarity = Math.min(0.45, Math.max(0.15, 0.45 - (idx * 0.03)));
       return result;
     });
   }
@@ -197,8 +198,8 @@ async function keywordSearch(query, topK, caseName, documentType) {
 
   return chunks.map((c, idx) => {
     const result = _mapChunkToResult(c);
-    /* Cap keyword-only scores at 0.75 — they're not real vector similarity */
-    result.similarity = Math.min(0.75, Math.max(0.4, 0.75 - (idx * 0.03)));
+    /* Keyword scores are NOT vector similarity — keep them low so the gate can distinguish */
+    result.similarity = Math.min(0.45, Math.max(0.15, 0.45 - (idx * 0.03)));
     return result;
   });
 }

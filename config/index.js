@@ -25,7 +25,7 @@ const envSchema = Joi.object({
   CHAT_MAX_TOKENS: Joi.number().integer().min(100).max(8000).default(2000),
   CHAT_TEMPERATURE: Joi.number().min(0).max(2).default(0.1),
   TOP_K_RESULTS: Joi.number().integer().min(1).max(100).default(10),
-  SIMILARITY_THRESHOLD: Joi.number().min(0).max(1).default(0.70),
+  SIMILARITY_THRESHOLD: Joi.number().min(0).max(1).default(0.35),
   RERANK_TOP_K: Joi.number().integer().min(1).max(50).default(5),
   HOST: Joi.string().default('0.0.0.0'),
   PORT: Joi.number().integer().default(8000),

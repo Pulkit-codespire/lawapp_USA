@@ -19,19 +19,26 @@ const { trackUsage } = require('./usageTracker');
 const openai = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
 const geminiClient = config.gemini?.apiKey ? new GoogleGenerativeAI(config.gemini.apiKey) : null;
 
-const VALID_INTENTS = ['case_query', 'legal_advice', 'hybrid', 'general'];
+const VALID_INTENTS = ['greeting', 'case_query', 'legal_advice', 'hybrid', 'general'];
 
 const CLASSIFIER_PROMPT = `You are a legal query router for a UK law application. A lawyer is asking a question. Classify it into EXACTLY one of these categories:
 
-- "case_query" — The lawyer is asking about specific facts, dates, evidence, or content from their uploaded case documents. Examples: "What was the court order date?", "Show me the defense argument", "What evidence is in document X?"
+- "greeting" — Casual greetings, small talk, thanks, or pleasantries that are NOT a legal question. Examples: "hi", "hello", "hey", "hii", "good morning", "thanks", "thank you", "bye", "how are you", "what's up"
 
-- "legal_advice" — The lawyer wants legal strategy, tactical advice, or guidance on how to proceed. They want to know what to DO, not just what the documents SAY. Examples: "How should I argue this defense?", "What are my chances of winning?", "How to challenge this evidence?", "What strategy should I use?"
+- "case_query" — The lawyer is asking about specific facts, dates, names, evidence, or content that would be found in case documents. This includes questions about specific people, events, findings, or details from a case. Examples: "What was the coroner's conclusion for Balram Patel?", "What was the court order date?", "Show me the defense argument", "What evidence is in the bundle?", "Summarize the case files", "What did the witness say?"
 
-- "hybrid" — The lawyer needs BOTH their case document facts AND UK legal knowledge combined. They want to connect their case to applicable law. Examples: "Based on my case, which UK Act applies?", "Does the evidence in my files support a Section 18 charge?", "How does the Limitation Act affect my client's claim?"
+- "legal_advice" — The lawyer wants general legal strategy, tactical advice, or guidance on a HYPOTHETICAL or GENERAL situation NOT tied to any specific person or case fact. They describe a situation and want to know what to DO. Examples: "My vehicle got impounded what to do?", "What are my chances of winning a fraud case?", "How to challenge evidence in general?", "My client was arrested what should I do?", "What strategy should I use for a personal injury claim?"
 
-- "general" — A general UK law question not tied to any specific case files. Examples: "What is Section 18 of the Offences Against the Person Act?", "Explain the CPR Part 36 offer process", "What are the sentencing guidelines for fraud?"
+- "hybrid" — The lawyer wants UK legal analysis applied to their specific case facts. They ask how law applies to specific case details. Examples: "Based on my case, which UK Act applies?", "Does the evidence support a Section 18 charge?", "How does the Limitation Act affect the claim?"
+
+- "general" — A general UK law question not tied to any specific case or situation. Pure legal knowledge. Examples: "What is Section 18 of the Offences Against the Person Act?", "Explain the CPR Part 36 offer process", "What are the sentencing guidelines for fraud?"
+
+KEY DISTINCTION: If the question mentions a specific person's name (e.g., "Balram Patel"), specific case details, or asks about facts/evidence/findings, it is "case_query". If the question describes a general situation and asks "what to do" without referencing specific case facts or people, it is "legal_advice".
 
 Reply with ONLY the category name. Nothing else.`;
+
+/* Fast local greeting detection — bypasses LLM entirely */
+const GREETING_PATTERNS = /^\s*(h{0,1}(i{1,5}|ello|ey|owdy)|yo\b|sup\b|good\s*(morning|afternoon|evening|night|day)|gm\b|thanks?(\s*you)?|thankyou|thx|bye|goodbye|see\s*ya|cheers|whats?\s*up|how\s*are\s*you|how\s*do\s*you\s*do|welcome|namaste|greetings?|hola)\s*[!?.]*\s*$/i;
 
 /**
  * Classify a user query to determine the correct response pipeline.
@@ -40,6 +47,12 @@ Reply with ONLY the category name. Nothing else.`;
  * @returns {Promise<{intent: string, model: string}>}
  */
 async function classify(question, chatModel) {
+  /* Fast-path: catch greetings locally without burning an LLM call */
+  if (GREETING_PATTERNS.test(question)) {
+    logger.info(`Query classified as "greeting" (model: local-regex)`);
+    return { intent: 'greeting', model: 'local-regex' };
+  }
+
   const model = _pickClassifierModel(chatModel);
   const isGemini = model.startsWith('gemini');
 

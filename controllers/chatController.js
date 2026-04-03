@@ -50,6 +50,31 @@ async function postChat(req, res) {
 
   /* ── Step 2: Route based on intent ── */
 
+  /* GREETING — casual hello/hi/thanks, no AI or document search needed */
+  if (intent === 'greeting') {
+    const greetings = [
+      'Hello! How can I assist you with your legal research today?',
+      'Hi there! Ready to help with your case. What would you like to know?',
+      'Hey! I\'m here to help with your legal questions. What can I do for you?',
+    ];
+    const answer = greetings[Math.floor(Math.random() * greetings.length)];
+
+    await _saveChatHistory(sessionId, question, answer, [], 0);
+    await _updateSessionTitle(sessionId, question);
+
+    return res.status(HTTP_STATUS.OK).json({
+      answer,
+      sources: [],
+      confidence: 'greeting',
+      confidence_score: 1,
+      confidence_reason: 'Greeting response.',
+      session_id: sessionId,
+      tokens_used: 0,
+      intent,
+      warnings: [],
+    });
+  }
+
   /* LEGAL ADVICE — pure UK law strategy, no document search needed */
   if (intent === 'legal_advice') {
     const chatHistory = await _getChatHistory(sessionId);
@@ -125,6 +150,30 @@ async function postChat(req, res) {
 
   /* Rerank */
   const reranked = reranker.rerank(chunks, question);
+
+  /* Safety net: if best reranked chunk has very low vector similarity, the docs are likely irrelevant.
+     Fall back to UK law advice instead of feeding garbage context to the LLM. */
+  const bestScore = reranked.length > 0 ? reranked[0].similarity : 0;
+  if (bestScore < 0.30) {
+    logger.info(`Low relevance after rerank (best: ${bestScore.toFixed(3)}) — falling back to UK law answer`);
+    const chatHistory = await _getChatHistory(sessionId);
+    const generated = await generator.generateLegalAdvice(question, chatHistory, aiOverrides);
+
+    await _saveChatHistory(sessionId, question, generated.answer, [], 0);
+    await _updateSessionTitle(sessionId, question);
+
+    return res.status(HTTP_STATUS.OK).json({
+      answer: generated.answer,
+      sources: [],
+      confidence: 'advice',
+      confidence_score: 0,
+      confidence_reason: 'No closely matching case files found. Answered with UK law knowledge.',
+      session_id: sessionId,
+      tokens_used: generated.tokensUsed,
+      intent,
+      warnings: ['No closely relevant case documents found for this query. This answer uses general UK law knowledge.'],
+    });
+  }
 
   /* Load chat history */
   const chatHistory = await _getChatHistory(sessionId);
