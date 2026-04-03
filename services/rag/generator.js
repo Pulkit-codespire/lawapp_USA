@@ -63,28 +63,12 @@ async function generate(query, chunks, chatHistory = [], aiOverrides = {}) {
   const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
   const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : config.chat.temperature;
 
-  try {
-    let answer;
-    let tokensUsed = 0;
-
-    let inputTok = 0, outputTok = 0;
-
-    if (_isGeminiModel(model)) {
-      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
-      inputTok = Math.round(tokensUsed * 0.7);
-      outputTok = tokensUsed - inputTok;
-    } else {
-      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
-      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
-      tokensUsed = response.usage?.total_tokens || 0;
-      inputTok = response.usage?.prompt_tokens || 0;
-      outputTok = response.usage?.completion_tokens || 0;
-    }
+  const { answer, tokensUsed, inputTok, outputTok, usedModel } = await _callLLMWithFallback(model, messages, maxTokens, temperature);
 
     /* Track usage (fire-and-forget) */
     trackUsage({
       operation: 'chat',
-      model,
+      model: usedModel,
       inputTokens: inputTok,
       outputTokens: outputTok,
       totalTokens: tokensUsed,
@@ -94,7 +78,7 @@ async function generate(query, chunks, chatHistory = [], aiOverrides = {}) {
     const sources = _extractSources(chunks);
     const { confidence, confidenceScore } = _assessConfidence(chunks, answer);
 
-    logger.info(`Generated answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}, confidence: ${confidence}`);
+    logger.info(`Generated answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${usedModel}, confidence: ${confidence}`);
 
     return {
       answer,
@@ -102,10 +86,44 @@ async function generate(query, chunks, chatHistory = [], aiOverrides = {}) {
       confidence,
       confidenceScore,
       tokensUsed,
-      model: config.chat.model,
+      model: usedModel,
     };
-  } catch (err) {
-    throw new ExternalServiceError(`LLM generation failed (${model}): ${err.message}`);
+}
+
+/**
+ * Call Gemini LLM with automatic retry using a fallback Gemini model if the primary fails.
+ * @param {string} model - Primary Gemini model
+ * @param {Array} messages - Chat messages
+ * @param {number} maxTokens
+ * @param {number} temperature
+ * @returns {Promise<{answer: string, tokensUsed: number, inputTok: number, outputTok: number, usedModel: string}>}
+ * @private
+ */
+async function _callLLMWithFallback(model, messages, maxTokens, temperature) {
+  if (!geminiClient) {
+    throw new ExternalServiceError('GEMINI_API_KEY is not configured. Add it to your .env file.');
+  }
+
+  /* Ensure we're using a Gemini model */
+  const primaryModel = _isGeminiModel(model) ? model : 'gemini-2.5-flash';
+
+  /* Try primary Gemini model */
+  try {
+    const { answer, tokensUsed } = await _generateWithGemini(primaryModel, messages, maxTokens, temperature);
+    return { answer, tokensUsed, inputTok: Math.round(tokensUsed * 0.7), outputTok: tokensUsed - Math.round(tokensUsed * 0.7), usedModel: primaryModel };
+  } catch (primaryErr) {
+    logger.warn(`Primary Gemini model (${primaryModel}) failed: ${primaryErr.message}`);
+
+    /* Fallback: try a different Gemini model */
+    const fallbackModel = primaryModel === 'gemini-2.0-flash' ? 'gemini-2.5-flash' : 'gemini-2.0-flash';
+    try {
+      logger.info(`Retrying with fallback Gemini model (${fallbackModel})...`);
+      const { answer, tokensUsed } = await _generateWithGemini(fallbackModel, messages, maxTokens, temperature);
+      return { answer, tokensUsed, inputTok: Math.round(tokensUsed * 0.7), outputTok: tokensUsed - Math.round(tokensUsed * 0.7), usedModel: fallbackModel };
+    } catch (fallbackErr) {
+      logger.error(`Fallback Gemini model (${fallbackModel}) also failed: ${fallbackErr.message}`);
+      throw new ExternalServiceError(`Both Gemini models failed. Primary (${primaryModel}): ${primaryErr.message}. Fallback (${fallbackModel}): ${fallbackErr.message}`);
+    }
   }
 }
 
@@ -245,34 +263,18 @@ async function generateGeneral(query, chatHistory = [], aiOverrides = {}) {
   const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
   const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : config.chat.temperature;
 
-  try {
-    let answer;
-    let tokensUsed = 0;
-
-    let inputTok = 0, outputTok = 0;
-
-    if (_isGeminiModel(model)) {
-      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
-      inputTok = Math.round(tokensUsed * 0.7);
-      outputTok = tokensUsed - inputTok;
-    } else {
-      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
-      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
-      tokensUsed = response.usage?.total_tokens || 0;
-      inputTok = response.usage?.prompt_tokens || 0;
-      outputTok = response.usage?.completion_tokens || 0;
-    }
+  const { answer, tokensUsed, inputTok, outputTok, usedModel } = await _callLLMWithFallback(model, messages, maxTokens, temperature);
 
     trackUsage({
       operation: 'chat',
-      model,
+      model: usedModel,
       inputTokens: inputTok,
       outputTokens: outputTok,
       totalTokens: tokensUsed,
       metadata: { type: 'general' },
     });
 
-    logger.info(`General answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
+    logger.info(`General answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${usedModel}`);
 
     return {
       answer,
@@ -280,11 +282,8 @@ async function generateGeneral(query, chatHistory = [], aiOverrides = {}) {
       confidence: 'general',
       confidenceScore: 0,
       tokensUsed,
-      model: config.chat.model,
+      model: usedModel,
     };
-  } catch (err) {
-    throw new ExternalServiceError(`LLM generation failed (${model}): ${err.message}`);
-  }
 }
 
 /**
@@ -340,8 +339,17 @@ async function _generateWithGemini(model, messages, maxTokens, temperature) {
 
   const chat = geminiModel.startChat({ history });
   const result = await chat.sendMessage(lastMessage);
-  const answer = result.response.text() || 'Unable to generate a response.';
+
+  /* Check for safety-blocked or empty responses */
+  const candidates = result.response.candidates || [];
+  const blockReason = candidates[0]?.finishReason;
+  const answer = result.response.text() || '';
   const tokensUsed = result.response.usageMetadata?.totalTokenCount || 0;
+
+  if (!answer || answer.trim().length === 0) {
+    logger.warn(`Gemini returned empty response (finishReason: ${blockReason || 'unknown'}). Falling back to OpenAI.`);
+    throw new Error(`Gemini returned empty response (blocked or safety filter, reason: ${blockReason || 'unknown'})`);
+  }
 
   return { answer, tokensUsed };
 }
@@ -437,31 +445,18 @@ async function generateLegalAdvice(query, chatHistory = [], aiOverrides = {}) {
   const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
   const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.2;
 
-  try {
-    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
-
-    if (_isGeminiModel(model)) {
-      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
-      inputTok = Math.round(tokensUsed * 0.7);
-      outputTok = tokensUsed - inputTok;
-    } else {
-      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
-      answer = response.choices[0]?.message?.content || 'Unable to generate advice.';
-      tokensUsed = response.usage?.total_tokens || 0;
-      inputTok = response.usage?.prompt_tokens || 0;
-      outputTok = response.usage?.completion_tokens || 0;
-    }
+  const { answer, tokensUsed, inputTok, outputTok, usedModel } = await _callLLMWithFallback(model, messages, maxTokens, temperature);
 
     trackUsage({
       operation: 'chat',
-      model,
+      model: usedModel,
       inputTokens: inputTok,
       outputTokens: outputTok,
       totalTokens: tokensUsed,
       metadata: { type: 'legal_advice' },
     });
 
-    logger.info(`Legal advice: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
+    logger.info(`Legal advice: ${answer.length} chars, ${tokensUsed} tokens, model: ${usedModel}`);
 
     return {
       answer,
@@ -469,11 +464,8 @@ async function generateLegalAdvice(query, chatHistory = [], aiOverrides = {}) {
       confidence: 'advice',
       confidenceScore: 0,
       tokensUsed,
-      model,
+      model: usedModel,
     };
-  } catch (err) {
-    throw new ExternalServiceError(`Legal advice generation failed (${model}): ${err.message}`);
-  }
 }
 
 /**
@@ -504,24 +496,11 @@ async function generateHybrid(query, chunks, chatHistory = [], aiOverrides = {})
   const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
   const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.15;
 
-  try {
-    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
-
-    if (_isGeminiModel(model)) {
-      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
-      inputTok = Math.round(tokensUsed * 0.7);
-      outputTok = tokensUsed - inputTok;
-    } else {
-      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
-      answer = response.choices[0]?.message?.content || 'Unable to generate analysis.';
-      tokensUsed = response.usage?.total_tokens || 0;
-      inputTok = response.usage?.prompt_tokens || 0;
-      outputTok = response.usage?.completion_tokens || 0;
-    }
+  const { answer, tokensUsed, inputTok, outputTok, usedModel } = await _callLLMWithFallback(model, messages, maxTokens, temperature);
 
     trackUsage({
       operation: 'chat',
-      model,
+      model: usedModel,
       inputTokens: inputTok,
       outputTokens: outputTok,
       totalTokens: tokensUsed,
@@ -531,7 +510,7 @@ async function generateHybrid(query, chunks, chatHistory = [], aiOverrides = {})
     const sources = _extractSources(chunks);
     const { confidence, confidenceScore } = _assessConfidence(chunks, answer);
 
-    logger.info(`Hybrid answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}, confidence: ${confidence}`);
+    logger.info(`Hybrid answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${usedModel}, confidence: ${confidence}`);
 
     return {
       answer,
@@ -539,11 +518,8 @@ async function generateHybrid(query, chunks, chatHistory = [], aiOverrides = {})
       confidence,
       confidenceScore,
       tokensUsed,
-      model,
+      model: usedModel,
     };
-  } catch (err) {
-    throw new ExternalServiceError(`Hybrid generation failed (${model}): ${err.message}`);
-  }
 }
 
 /**
@@ -567,31 +543,18 @@ async function generateUKGeneral(query, chatHistory = [], aiOverrides = {}) {
   const maxTokens = aiOverrides.maxTokens || config.chat.maxTokens;
   const temperature = aiOverrides.temperature !== undefined ? aiOverrides.temperature : 0.15;
 
-  try {
-    let answer, tokensUsed = 0, inputTok = 0, outputTok = 0;
-
-    if (_isGeminiModel(model)) {
-      ({ answer, tokensUsed } = await _generateWithGemini(model, messages, maxTokens, temperature));
-      inputTok = Math.round(tokensUsed * 0.7);
-      outputTok = tokensUsed - inputTok;
-    } else {
-      const response = await openai.chat.completions.create({ model, messages, max_tokens: maxTokens, temperature });
-      answer = response.choices[0]?.message?.content || 'Unable to generate a response.';
-      tokensUsed = response.usage?.total_tokens || 0;
-      inputTok = response.usage?.prompt_tokens || 0;
-      outputTok = response.usage?.completion_tokens || 0;
-    }
+  const { answer, tokensUsed, inputTok, outputTok, usedModel } = await _callLLMWithFallback(model, messages, maxTokens, temperature);
 
     trackUsage({
       operation: 'chat',
-      model,
+      model: usedModel,
       inputTokens: inputTok,
       outputTokens: outputTok,
       totalTokens: tokensUsed,
       metadata: { type: 'uk_general' },
     });
 
-    logger.info(`UK general answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${model}`);
+    logger.info(`UK general answer: ${answer.length} chars, ${tokensUsed} tokens, model: ${usedModel}`);
 
     return {
       answer,
@@ -599,11 +562,8 @@ async function generateUKGeneral(query, chatHistory = [], aiOverrides = {}) {
       confidence: 'general',
       confidenceScore: 0,
       tokensUsed,
-      model,
+      model: usedModel,
     };
-  } catch (err) {
-    throw new ExternalServiceError(`UK general generation failed (${model}): ${err.message}`);
-  }
 }
 
 module.exports = { generate, generateGeneral, generateLegalAdvice, generateHybrid, generateUKGeneral };
