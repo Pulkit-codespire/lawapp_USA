@@ -21,6 +21,8 @@ const PRICING = {
   'text-embedding-3-large':  { input: 0.13, output: 0 },
   'text-embedding-ada-002':  { input: 0.10, output: 0 },
   // Gemini (free tier, but log for tracking)
+  'gemini-2.5-pro':         { input: 1.25, output: 10.00 },
+  'gemini-2.5-flash':       { input: 0, output: 0 },
   'gemini-2.0-flash':       { input: 0, output: 0 },
   'gemini-1.5-flash':       { input: 0, output: 0 },
   'gemini-1.5-pro':         { input: 1.25, output: 5.00 },

@@ -14,7 +14,7 @@ const nodeEnv = process.env.NODE_ENV || 'development';
 const sequelize = new Sequelize(databaseUrl, {
   dialect: 'postgres',
   dialectModule: pg,
-  logging: nodeEnv === 'development' ? (msg) => logger.debug(msg) : false,
+  logging: false,
   pool: {
     min: 0,
     max: 5,

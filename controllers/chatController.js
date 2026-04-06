@@ -4,7 +4,7 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
-const { ChatHistory, ChatSession } = require('../models');
+const { ChatHistory, ChatSession, Document, Chunk, sequelize } = require('../models');
 const retriever = require('../services/rag/retriever');
 const generator = require('../services/rag/generator');
 const reranker = require('../services/rag/reranker');
@@ -46,6 +46,8 @@ async function postChat(req, res) {
 
   /* ── Step 1: Classify intent ── */
   const { intent } = await queryClassifier.classify(question, model);
+  console.log(`\n📌 QUESTION: "${question}"`);
+  console.log(`🎯 CLASSIFICATION: ${intent}\n`);
   logger.info(`Intent: ${intent}`);
 
   /* ── Step 2: Route based on intent ── */
@@ -68,6 +70,26 @@ async function postChat(req, res) {
       confidence: 'greeting',
       confidence_score: 1,
       confidence_reason: 'Greeting response.',
+      session_id: sessionId,
+      tokens_used: 0,
+      intent,
+      warnings: [],
+    });
+  }
+
+  /* SYSTEM QUERY — database stats, case/document counts */
+  if (intent === 'system_query') {
+    const answer = await _buildSystemStatsAnswer(question);
+
+    await _saveChatHistory(sessionId, question, answer, [], 0);
+    await _updateSessionTitle(sessionId, question);
+
+    return res.status(HTTP_STATUS.OK).json({
+      answer,
+      sources: [],
+      confidence: 'system',
+      confidence_score: 1,
+      confidence_reason: 'Database statistics query.',
       session_id: sessionId,
       tokens_used: 0,
       intent,
@@ -117,7 +139,29 @@ async function postChat(req, res) {
     });
   }
 
-  /* CASE_QUERY or HYBRID — both need document search */
+  /* CASE_QUERY or HYBRID — check if user specified a case */
+  if (!caseName) {
+    const disambiguation = await _checkCaseDisambiguation(question);
+    if (disambiguation.needsAsk) {
+      const answer = disambiguation.message;
+      await _saveChatHistory(sessionId, question, answer, [], 0);
+      await _updateSessionTitle(sessionId, question);
+
+      return res.status(HTTP_STATUS.OK).json({
+        answer,
+        sources: [],
+        confidence: 'system',
+        confidence_score: 1,
+        confidence_reason: 'Multiple cases found. Please specify which case.',
+        session_id: sessionId,
+        tokens_used: 0,
+        intent,
+        warnings: [],
+      });
+    }
+  }
+
+  /* Search documents (with case filter if provided) */
   const chunks = await retriever.search(question, { caseName, documentType, topK, similarityThreshold });
 
   /* Retrieval gate check */
@@ -270,6 +314,182 @@ async function _updateSessionTitle(sessionId, question) {
   } catch (err) {
     /* Non-critical — don't fail the chat response */
     logger.warn(`Failed to update session title: ${err.message}`);
+  }
+}
+
+/**
+ * Detect what kind of system info the user wants.
+ * @param {string} question
+ * @returns {'cases' | 'documents' | 'overview'}
+ * @private
+ */
+function _detectSystemSubIntent(question) {
+  const q = question.toLowerCase();
+  if (/\b(list|show|what)\b.*\b(case|cases)\b/.test(q)) return 'cases';
+  if (/\b(list|show|what)\b.*\b(doc|docs|document|documents|file|files)\b/.test(q)) return 'documents';
+  if (/\bhow\s*many\b.*\b(doc|docs|document|documents|file|files)\b/.test(q)) return 'documents';
+  if (/\bhow\s*many\b.*\b(case|cases)\b/.test(q)) return 'cases';
+  return 'overview';
+}
+
+/**
+ * Query the database and build a natural language answer about system stats.
+ * Tailors response based on what the user asked (cases, documents, or overview).
+ * @param {string} question - The user's question
+ * @returns {Promise<string>}
+ * @private
+ */
+async function _buildSystemStatsAnswer(question) {
+  try {
+    const subIntent = _detectSystemSubIntent(question);
+
+    /* Fetch all stats in parallel */
+    const [totalDocs, totalChunks, cases, documents] = await Promise.all([
+      Document.count(),
+      Chunk.count(),
+      Document.findAll({
+        attributes: [
+          'caseName',
+          [sequelize.fn('COUNT', sequelize.col('id')), 'documentCount'],
+          [sequelize.fn('SUM', sequelize.col('total_chunks')), 'chunkCount'],
+        ],
+        group: ['caseName'],
+        order: [[sequelize.fn('COUNT', sequelize.col('id')), 'DESC']],
+        raw: true,
+      }),
+      subIntent === 'documents'
+        ? Document.findAll({
+            attributes: ['id', 'caseName', 'fileName', 'fileType', 'documentType', 'totalChunks', 'totalPages'],
+            order: [['caseName', 'ASC'], ['ingested_at', 'DESC']],
+            raw: true,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const totalCases = cases.length;
+
+    /* ── CASES view ── */
+    if (subIntent === 'cases') {
+      if (totalCases === 0) {
+        return `📂 **No cases found.**\n\nNo cases have been uploaded yet. Use the **Upload** feature to ingest your case documents.`;
+      }
+
+      let answer = `📂 **All Cases (${totalCases})**\n\n`;
+      cases.forEach((c, idx) => {
+        const docCount = parseInt(c.documentCount, 10);
+        const chunkCount = parseInt(c.chunkCount, 10) || 0;
+        answer += `**${idx + 1}. ${c.caseName}**\n`;
+        answer += `   - Documents: ${docCount}\n`;
+        answer += `   - Chunks indexed: ${chunkCount.toLocaleString()}\n\n`;
+      });
+      answer += `---\n*Total: ${totalCases} case(s), ${totalDocs} document(s), ${totalChunks.toLocaleString()} chunks*`;
+      return answer;
+    }
+
+    /* ── DOCUMENTS view ── */
+    if (subIntent === 'documents') {
+      if (documents.length === 0) {
+        return `📄 **No documents found.**\n\nNo documents have been uploaded yet. Use the **Upload** feature to ingest your files.`;
+      }
+
+      let answer = `📄 **All Documents (${totalDocs})**\n\n`;
+
+      /* Group documents by case */
+      const grouped = {};
+      documents.forEach((doc) => {
+        if (!grouped[doc.caseName]) grouped[doc.caseName] = [];
+        grouped[doc.caseName].push(doc);
+      });
+
+      Object.keys(grouped).forEach((caseName) => {
+        answer += `**📁 ${caseName}** (${grouped[caseName].length} files)\n\n`;
+        grouped[caseName].forEach((doc, idx) => {
+          const pages = doc.totalPages ? `, ${doc.totalPages} pages` : '';
+          const docType = doc.documentType ? ` — ${doc.documentType}` : '';
+          answer += `${idx + 1}. \`${doc.fileName}\` (${doc.fileType}${docType}${pages}, ${doc.totalChunks} chunks)\n`;
+        });
+        answer += `\n`;
+      });
+
+      answer += `---\n*Total: ${totalDocs} document(s) across ${totalCases} case(s)*`;
+      return answer;
+    }
+
+    /* ── OVERVIEW (default) ── */
+    let answer = `📊 **Database Overview**\n\n`;
+    answer += `- **Total Cases:** ${totalCases}\n`;
+    answer += `- **Total Documents:** ${totalDocs}\n`;
+    answer += `- **Total Chunks Indexed:** ${totalChunks.toLocaleString()}\n\n`;
+
+    if (totalCases === 0) {
+      answer += `No cases have been uploaded yet. Use the **Upload** feature to ingest your case documents.`;
+    } else {
+      answer += `---\n\n`;
+      answer += `**Case Breakdown:**\n\n`;
+      cases.forEach((c, idx) => {
+        const docCount = parseInt(c.documentCount, 10);
+        const chunkCount = parseInt(c.chunkCount, 10) || 0;
+        answer += `**${idx + 1}. ${c.caseName}**\n`;
+        answer += `   - Documents: ${docCount}\n`;
+        answer += `   - Chunks: ${chunkCount.toLocaleString()}\n\n`;
+      });
+    }
+
+    return answer;
+  } catch (err) {
+    logger.error(`System stats query failed: ${err.message}`);
+    return 'Sorry, I was unable to retrieve the database statistics. Please try again.';
+  }
+}
+
+/**
+ * Check if the user needs to specify which case they mean.
+ * If there are multiple cases and the question doesn't mention any case name,
+ * returns a message asking the user to clarify.
+ * @param {string} question - The user's question
+ * @returns {Promise<{needsAsk: boolean, message?: string}>}
+ * @private
+ */
+async function _checkCaseDisambiguation(question) {
+  try {
+    const cases = await Document.findAll({
+      attributes: [
+        'caseName',
+        [sequelize.fn('COUNT', sequelize.col('id')), 'documentCount'],
+      ],
+      group: ['caseName'],
+      order: [[sequelize.fn('COUNT', sequelize.col('id')), 'DESC']],
+      raw: true,
+    });
+
+    /* Only 1 case or no cases — no need to ask */
+    if (cases.length <= 1) {
+      return { needsAsk: false };
+    }
+
+    /* Check if the question already mentions a case name */
+    const questionLower = question.toLowerCase();
+    const mentionsCase = cases.some((c) =>
+      questionLower.includes(c.caseName.toLowerCase())
+    );
+
+    if (mentionsCase) {
+      return { needsAsk: false };
+    }
+
+    /* Multiple cases and none mentioned — ask the user */
+    let message = `📂 You have **${cases.length} cases** in the database. Which case are you referring to?\n\n`;
+    cases.forEach((c, idx) => {
+      const docCount = parseInt(c.documentCount, 10);
+      message += `**${idx + 1}. ${c.caseName}** (${docCount} document${docCount !== 1 ? 's' : ''})\n`;
+    });
+    message += `\nPlease mention the case name in your question, or use the **case filter** dropdown to select one.`;
+
+    return { needsAsk: true, message };
+  } catch (err) {
+    logger.warn(`Case disambiguation check failed: ${err.message}`);
+    /* Don't block the query — just proceed without asking */
+    return { needsAsk: false };
   }
 }
 

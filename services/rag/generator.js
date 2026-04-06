@@ -28,6 +28,8 @@ function _isGeminiModel(model) {
 /** Legal system prompt enforcing grounded answers */
 const LEGAL_SYSTEM_PROMPT = `You are a legal research assistant. You help lawyers find information from their case files.
 
+TONE: Be direct, professional, and concise. Do NOT use enthusiastic language like "Excellent!", "Great question!" — just provide the information.
+
 CRITICAL RULES:
 1. ONLY answer based on the provided document excerpts below.
 2. If the documents don't contain information DIRECTLY RELEVANT to the user's question, say "I could not find this information in your case files." Do NOT present unrelated document content.
@@ -115,7 +117,7 @@ async function _callLLMWithFallback(model, messages, maxTokens, temperature) {
     logger.warn(`Primary Gemini model (${primaryModel}) failed: ${primaryErr.message}`);
 
     /* Fallback: try a different Gemini model */
-    const fallbackModel = primaryModel === 'gemini-2.0-flash' ? 'gemini-2.5-flash' : 'gemini-2.0-flash';
+    const fallbackModel = primaryModel === 'gemini-2.5-flash' ? 'gemini-1.5-flash' : 'gemini-2.5-flash';
     try {
       logger.info(`Retrying with fallback Gemini model (${fallbackModel})...`);
       const { answer, tokensUsed } = await _generateWithGemini(fallbackModel, messages, maxTokens, temperature);
@@ -305,12 +307,18 @@ async function _generateWithGemini(model, messages, maxTokens, temperature) {
   const systemMsg = messages.find((m) => m.role === 'system');
   const conversation = messages.filter((m) => m.role !== 'system');
 
+  /* Gemini 2.5 models use "thinking" tokens that consume maxOutputTokens.
+     Increase output budget so thinking doesn't eat the entire response. */
+  const is25Model = model.includes('2.5');
+  const effectiveMaxTokens = is25Model ? Math.max(maxTokens * 4, 8192) : maxTokens;
+
   const geminiModel = geminiClient.getGenerativeModel({
     model,
     systemInstruction: systemMsg?.content || '',
     generationConfig: {
-      maxOutputTokens: maxTokens,
+      maxOutputTokens: effectiveMaxTokens,
       temperature,
+      ...(is25Model ? { thinkingConfig: { thinkingBudget: 2048 } } : {}),
     },
   });
 
@@ -362,7 +370,9 @@ async function _generateWithGemini(model, messages, maxTokens, temperature) {
  * UK Legal Advisor system prompt — for strategy and tactical advice.
  * No case documents provided; answers from UK law knowledge.
  */
-const UK_LEGAL_ADVISOR_PROMPT = `You are an expert UK legal advisor and litigation strategist. You help lawyers build winning case strategies based on UK law.
+const UK_LEGAL_ADVISOR_PROMPT = `You are an expert UK legal advisor and litigation strategist. You provide clear, professional legal guidance to qualified lawyers based on UK law.
+
+TONE: Be direct, professional, and authoritative. Do NOT use enthusiastic language like "Excellent!", "Great question!", "Let's build..." — just provide the legal analysis straightforwardly.
 
 IMPORTANT RULES:
 1. ALL advice must be based on UK law — English & Welsh jurisdiction unless specified otherwise.
@@ -388,6 +398,8 @@ STRUCTURE your advice as:
  */
 const UK_HYBRID_PROMPT = `You are an expert UK legal research assistant with deep knowledge of UK law. You help lawyers by combining their case file evidence with applicable UK law.
 
+TONE: Be direct, professional, and authoritative. Do NOT use enthusiastic language like "Excellent!", "Great question!", "Let's build..." — just provide the legal analysis straightforwardly.
+
 CRITICAL RULES:
 1. Use the provided document excerpts for CASE-SPECIFIC FACTS and evidence.
 2. Apply UK law knowledge to analyse those facts — cite specific statutes, sections, and case law.
@@ -411,6 +423,8 @@ STRUCTURE your analysis as:
  * General UK law prompt — for pure law questions without case context.
  */
 const UK_GENERAL_PROMPT = `You are an expert UK legal knowledge assistant. You answer questions about UK law clearly and accurately.
+
+TONE: Be direct, professional, and authoritative. Do NOT use enthusiastic language like "Excellent!", "Great question!", "Let's dive in..." — just provide the legal information straightforwardly.
 
 IMPORTANT RULES:
 1. ALL answers must be based on UK law — English & Welsh jurisdiction unless otherwise specified.
